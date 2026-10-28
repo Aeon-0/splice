@@ -2,70 +2,110 @@
 <html lang="en-GB">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#f6f5f1">
-  <title>Splice — Find the beats. Make them yours.</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23734cf5'/%3E%3Cpath d='M12 10v20m8-16v12m8-16v20' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0E0D0C">
+  <title>Splice — Your cut sheet</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230E0D0C'/%3E%3Cpath d='M23 9H13a4 4 0 0 0 0 8h6a3 3 0 0 1 0 6H9' fill='none' stroke='%23F4F0E8' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/styles.css">
   <script src="/static/app.js" defer></script>
 </head>
-<body>
-  <div class="shell">
-    <header class="site-header">
-      <a class="brand" href="/" aria-label="Splice home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><b>Splice</b></a>
-      <span class="local-badge"><span></span> Your local workspace</span>
-    </header>
+<body data-screen="empty">
+  <header class="top-bar">
+    <span class="wordmark">Splice</span>
+    <button id="new-upload" class="text-button" type="button">New upload</button>
+  </header>
 
-    <main>
-      <section class="intro">
-        <p class="eyebrow">A little structure for your next big idea</p>
-        <h1>Find the beats.<br class="mobile-break"> <span>Make them yours.</span></h1>
-        <p>Upload a reel or video from your phone or computer. Watch each beat, then write your own take.</p>
-      </section>
+  <main>
+    <input id="video-file" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v,video/x-matroska,video/x-msvideo,.mp4,.mov,.webm,.m4v,.mkv,.avi" aria-label="Choose a video" hidden>
 
-      <section class="source-panel" aria-label="Choose a source video">
-        <div class="source-tabs" role="tablist" aria-label="Video source">
-          <button type="button" id="tab-upload" role="tab" aria-selected="true" aria-controls="panel-upload">↑ <span>Upload</span></button>
+    <section id="screen-empty" class="screen centred-screen" aria-labelledby="empty-title">
+      <div class="upload-layout">
+        <div id="dropzone" class="dropzone" tabindex="0" role="group" aria-label="Video upload. Press Enter or Space to choose a video." aria-describedby="upload-formats upload-limits upload-error">
+          <svg class="upload-glyph" width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+            <path d="M16 22V5m-6 6 6-6 6 6M6 21v6h20v-6"/>
+          </svg>
+          <h1 id="empty-title">Drop a reel here</h1>
+          <button id="choose-video" class="primary-button" type="button">Choose video</button>
+          <p id="upload-formats" class="upload-formats">MP4 · MOV · WEBM · M4V · MKV · AVI</p>
+          <p id="upload-limits" class="upload-limits">Up to 500 MiB · max 10 minutes</p>
         </div>
-        <form id="source-form">
-          <div id="panel-upload" role="tabpanel" aria-labelledby="tab-upload">
-            <label for="video-file">Upload a video from your device</label>
-            <div class="input-row"><input id="video-file" type="file" accept=".mp4,.mov,.m4v,.webm,.mkv,.avi,video/*"><button class="primary analyse-button" type="submit">Find the cuts <span aria-hidden="true">→</span></button></div>
-            <p class="field-note">MP4, MOV, M4V, WebM, MKV or AVI · Up to 500 MiB and 10 minutes</p>
+        <p id="upload-error" class="error-message" role="alert" hidden></p>
+        <p class="upload-helper">Download the reel first, then upload.</p>
+        <noscript><p class="error-message">Enable JavaScript to upload and view your cut sheet.</p></noscript>
+      </div>
+    </section>
+
+    <section id="screen-loading" class="screen centred-screen" aria-labelledby="loading-title">
+      <div class="loading-layout">
+        <h1 id="loading-title" class="screen-title" tabindex="-1">Analysing your reel…</h1>
+        <p class="source-meta"><span id="source-name"></span><span id="source-size"></span></p>
+        <ol id="loading-stages" class="loading-stages" aria-label="Video preparation">
+          <li data-stage="0"><span class="stage-marker" aria-hidden="true">1</span><span class="stage-name">Uploading</span><span class="stage-state">Waiting</span></li>
+          <li data-stage="1"><span class="stage-marker" aria-hidden="true">2</span><span class="stage-name">Finding cuts</span><span class="stage-state">Waiting</span></li>
+          <li data-stage="2"><span class="stage-marker" aria-hidden="true">3</span><span class="stage-name">Transcribing</span><span class="stage-state">Waiting</span></li>
+          <li data-stage="3"><span class="stage-marker" aria-hidden="true">4</span><span class="stage-name">Ready</span><span class="stage-state">Waiting</span></li>
+        </ol>
+        <div id="stage-progress" class="stage-progress is-indeterminate" role="progressbar" aria-label="Uploading" aria-valuetext="Uploading">
+          <span id="progress-fill" class="progress-fill"></span>
+        </div>
+        <p id="upload-bytes" class="progress-detail" hidden></p>
+        <p id="loading-note" class="loading-note" hidden></p>
+        <p id="loading-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
+        <div id="loading-error" class="loading-error" hidden>
+          <p id="processing-error" class="error-message" role="alert"></p>
+          <div class="error-actions">
+            <button id="retry-upload" class="primary-button" type="button">Retry</button>
+            <button id="choose-another" class="secondary-button" type="button">Choose another video</button>
           </div>
-        </form>
-        <div class="source-footer"><span><span class="tiny-wave" aria-hidden="true">▥</span> ffmpeg cuts · Local Whisper transcripts</span><span>No account needed</span></div>
-      </section>
+        </div>
+        <button id="cancel-upload" class="text-button cancel-button" type="button">New upload</button>
+      </div>
+    </section>
 
-      <section id="job-status" class="job-status" aria-live="polite" hidden>
-        <div class="status-line"><span id="status-label"></span><span id="status-percentage"></span></div>
-        <progress id="job-progress" max="100" value="0" aria-label="Analysis progress"></progress>
-      </section>
-      <p id="error-message" class="notice error" role="alert" hidden></p>
-      <p id="warning-message" class="notice warning" role="status" hidden></p>
+    <section id="screen-result" class="screen result-screen" aria-labelledby="result-title">
+      <div class="result-heading">
+        <h1 id="result-title" class="screen-title" tabindex="-1">Cuts · <span id="cut-count">0</span></h1>
+        <p id="total-duration" class="total-duration">Total 0.00s</p>
+      </div>
+      <div id="cut-strip" class="cut-strip" role="group" aria-label="Cuts. Use left and right arrow keys to select; Enter to play."></div>
+      <p id="result-warning" class="result-warning" role="status" hidden></p>
 
-      <section id="empty-state" class="empty-state">
-        <div class="empty-art" aria-hidden="true"><div class="mini-card one"><i></i><i></i></div><div class="mini-card two"><span>▶</span></div><div class="mini-card three"><i></i><i></i><i></i></div><span class="art-spark">✳</span></div>
-        <h2>Your next reel starts here</h2>
-        <p>Upload a video above and we’ll break it into a stack of cuts.<br>One clip, one idea, one take at a time.</p>
-        <div class="steps"><span><b>01</b> Upload a video</span><span aria-hidden="true">→</span><span><b>02</b> Explore the cuts</span><span aria-hidden="true">→</span><span><b>03</b> Write your take</span></div>
-      </section>
-
-      <section id="workspace" class="workspace" aria-label="Your cut sheet" hidden>
-        <aside class="cut-stack">
-          <div class="stack-heading"><h2>Your cut sheet <span id="cut-count">0</span></h2><p id="total-duration"></p></div>
-          <div id="cut-list" class="cut-list" aria-label="Choose a clip"></div>
-        </aside>
-        <section class="editor" aria-label="Selected clip">
-          <div class="editor-header"><div><p class="eyebrow">One beat at a time</p><h2 id="selected-title">Cut 01</h2></div><span id="selected-duration" class="duration-badge">0.00s</span></div>
-          <div class="editor-body">
-            <div class="preview-column"><div class="player-frame"><video id="clip-player" controls playsinline preload="metadata" aria-label="Selected cut video"></video></div><div class="clip-meta"><span id="selected-range"></span><a id="download-clip" download>Download clip ↓</a></div></div>
-            <div class="transcript-column"><div class="transcript-heading"><label for="transcript">Your words</label><button id="reset-transcript" type="button" class="text-button">Reset to transcript</button></div><p class="transcript-help">Start with the transcript. Rewrite it as something you’d actually say.</p><textarea id="transcript" placeholder="No speech in this beat? Write what you’ll say here." spellcheck="true"></textarea><div class="draft-meta"><span id="draft-state">Original transcript</span><span id="word-count">0 words</span></div><p class="draft-note">Edits stay in this browser tab. Copy your words before closing it.</p><div class="beat-navigation"><button id="previous-cut" type="button">← Previous</button><button id="next-cut" type="button">Next cut →</button></div></div>
+      <div class="cut-editor">
+        <div class="preview-column">
+          <div class="player-frame">
+            <video id="clip-player" controls playsinline preload="metadata" aria-label="Selected cut"></video>
           </div>
-        </section>
-      </section>
-    </main>
-    <footer class="site-footer"><span>Made for the way creators work.</span><span>Hard cuts, human ideas.</span></footer>
-  </div>
+          <div class="playback-actions" aria-label="Cut playback">
+            <button id="previous-cut" class="text-button" type="button" aria-label="Previous cut">← Previous</button>
+            <button id="replay-cut" class="text-button" type="button">Replay cut</button>
+            <button id="next-cut" class="text-button" type="button" aria-label="Next cut">Next →</button>
+          </div>
+          <p id="player-error" class="error-message" role="alert" hidden></p>
+        </div>
+
+        <div class="cut-details">
+          <div class="selected-summary">
+            <h2 id="selected-title">Cut 1 of 1</h2>
+            <p id="selected-duration" class="selected-duration">0.00 seconds</p>
+            <p id="selected-range" class="selected-range">00:00.00 – 00:00.00</p>
+          </div>
+          <div class="transcript-panel">
+            <label for="transcript">Edit what you'll say</label>
+            <textarea id="transcript" placeholder="No speech detected — type the line you'll record." spellcheck="true" aria-describedby="draft-note"></textarea>
+            <div class="draft-meta"><span id="draft-state">Original transcript</span><span id="word-count">0 words</span></div>
+            <p id="draft-note" class="draft-note">Edits are saved in this browser tab.</p>
+            <div class="transcript-actions">
+              <button id="reset-transcript" class="text-button" type="button" disabled>Reset transcript</button>
+              <a id="download-clip" class="text-button" download>Download cut ↓</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
 </body>
 </html>

@@ -27,7 +27,7 @@ The existing environment is used directly; activation and dependency installatio
 | faster-whisper | 1.2.1 |
 | ffmpeg / ffprobe | `/opt/homebrew/bin/ffmpeg`, `/opt/homebrew/bin/ffprobe` |
 
-There are no frontend dependencies, remote fonts or CDNs. A bounded streaming reader handles the single-file multipart upload; `python-multipart` is not needed. To run in the foreground instead:
+There are no frontend package dependencies. The UI loads IBM Plex Sans and Mono from Google Fonts, with system font fallbacks. A bounded streaming reader handles the single-file multipart upload; `python-multipart` is not needed. To run in the foreground instead:
 
 ```sh
 /Users/aeon/aeon-env/bin/uvicorn app:app --host 0.0.0.0 --port 8787
@@ -35,13 +35,13 @@ There are no frontend dependencies, remote fonts or CDNs. A bounded streaming re
 
 ## Use it
 
-1. **Upload** is selected when the page opens. Choose a video saved on your phone or computer, then select **Find the cuts**.
-2. Select a cut card to play that MP4 alone. Its duration and source time range appear beside it. Download an individual clip with **Download clip**.
-3. Edit **Your words**. Drafts survive refreshes in the same browser tab using session storage. **Reset to transcript** restores Whisper's text. Copy your words before closing the tab; there is no long-term save or transcript-edit API.
+1. Drop a saved video into the upload box or select **Choose video**. Preparation starts immediately, with **Uploading → Finding cuts → Transcribing → Ready** stages.
+2. Select a thumbnail above the player to play that cut alone. Use the left/right arrow keys to select another cut and Enter to play it. Its duration and source time range appear beside the player, or below it on mobile. **Download cut** saves the selected MP4.
+3. Edit **Edit what you'll say**. Drafts and the selected cut survive refreshes in the same browser tab using session storage. **Reset transcript** restores Whisper's text. Copy your words before closing the tab; there is no long-term save or transcript-edit API. **New upload** returns to the upload box.
 
 Local paths remain available through `/api/analyze` for server-side smoke testing, outside the UI. Copy a video into `data/sample/` and submit its `filePath` as shown below. Server-side paths must resolve inside the project; uploads can come from anywhere on your device.
 
-Inputs: MP4, MOV/M4V, WebM/MKV and AVI; maximum 500 MiB and 10 minutes. One worker processes jobs in order, up to 100 jobs per server session and 200 cuts per video. The UI shows clips before transcription finishes. Processing limits and timeouts favour short reels.
+Inputs: MP4, MOV/M4V, WebM/MKV and AVI; maximum 500 MiB and 10 minutes. One worker processes jobs in order, up to 100 jobs per server session and 200 cuts per video. The UI opens the cut sheet once preparation finishes, including when transcription falls back to empty text. Processing limits and timeouts favour short reels.
 
 ## Exact hard-cut method
 
@@ -118,6 +118,7 @@ GET `/` serves the UI, `/api/health` checks readiness, `/docs` provides FastAPI'
 /Users/aeon/aeon-env/bin/python -m unittest discover -s tests -v
 ./scripts/smoke_local.sh
 node --check static/app.js
+node --test tests/test_ui.js
 sh -n start.sh stop.sh scripts/smoke_local.sh
 ```
 
