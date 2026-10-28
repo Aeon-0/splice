@@ -1,0 +1,11 @@
+data/
+.tmp/
+__pycache__/
+*.pyc
+.env
+.venv/
+cookies.txt
+*.cookies
+.DS_Store
+node_modules/
+.jobs/
