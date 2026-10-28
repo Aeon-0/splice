@@ -1,133 +1,90 @@
 # Splice
 
-Upload a reel or video from your phone or computer, get separate MP4s for its hard cuts, and write your own words beside each beat. **Upload is the only input in the MVP UI.** A mobile-friendly single page plays each selected clip on its own and shows its duration to two decimal places. Cut detection uses **ffmpeg only**. Local Whisper supplies an editable starting transcript; there is no script rewriting, LLM, paid API or vision model.
+Splice turns an uploaded video into an original player, a strip of cuts and editable transcripts. The interface is light only, with blue branding. Choose a cut to see its video on the left and transcript/duration on the right; smaller screens stack these. **New Video is the last chip** and asks once before clearing the current workspace. The homepage lists each account's latest **10** jobs; older job records, originals, audio and clips are hard-deleted.
 
-## Start and stop
+Uploads are **MP4, MOV or WebM only**, up to **200 MiB, 300 seconds, 1920 × 1920 and 60 fps**. There is no URL downloader, Instagram, yt-dlp, local-path API or public media directory. ffmpeg detects hard changes above scene score 0.25, ignoring boundaries within 0.12 seconds of each other. It creates H.264/AAC MP4 cuts; Whisper supplies starting transcripts when the offline model is available. Edits save to the authenticated job, not browser storage.
 
-From this project:
+## Security and access
 
-```sh
-./start.sh
-./stop.sh
-```
+Read [the security brief](docs/splice-security-brief.md) and [implementation/verification status](docs/security-verification.md) before DNS or creator access.
 
-- Local: **http://127.0.0.1:8787**
-- LAN: **http://192.168.1.98:8787** (same network; the Mac must still have that address and permit incoming connections).
-- Binds **0.0.0.0:8787**. Port **3100** is untouched. This is an unauthenticated local/LAN tool; use it on a trusted network.
-- `start.sh` checks the port, launches a background process and waits for health. Repeat starts are safe. `stop.sh` checks the PID belongs to this project before sending SIGTERM. An active job may need time to finish.
-- PID and logs: `data/server.pid`, `data/server.log`. Job status is held in memory; restarting clears the job list.
+- Only approved emails can sign in. There is no signup. The administrator is hard-bound to `lukesa100@gmail.com`; admin access never grants access to another account's media.
+- The admin page adds/removes access with password re-authentication. It records the actor, action, subject and timestamp. Removing access or resetting an account's initial password immediately revokes its sessions.
+- All jobs, originals, cuts, transcript reads/writes, downloads, `HEAD` and byte-range requests check the logged-in owner. Cross-account objects return 404. Private responses use `Cache-Control: no-store`.
+- Session identifiers are random, HMAC-hashed in SQLite, rotated on login and revoked on logout. Production cookies are host-only, Secure, HttpOnly and SameSite=Lax; server expiry is 30 minutes idle / 10 hours absolute.
+- Mutations—including login—require `X-Requested-With: Splice`; supplied Origin must match the configured origin and cross-site Fetch Metadata is rejected. No cross-origin permissions are enabled. GET does not mutate user data.
+- Login limits: 5 attempts/account and 20/IP per 15 minutes, with a global cap. Upload/create: 5/hour/account, 10/hour/IP, one active job/account, two active jobs across the service and one processing worker. Limits survive restarts and return 429 with Retry-After.
+- Files use generated user/job UUIDs outside the webroot. A bounded streaming parser rejects unsafe filenames and extra form fields. Magic bytes, a restricted ffprobe, codec/duration/resolution/frame-rate limits and common HTML/PHP/playlist signatures are checked before decoding.
+- All media commands use argv arrays, `shell=False`, fixed binary paths, no stdin and input protocol `file` only. Playlist demuxers are disabled. Outputs, threads, per-command and total job time are bounded. Decoders inherit a minimal environment without application secrets. Whisper runs in a reusable, killable child and is strictly offline.
+- Partial output/audio is removed on failure, timeout or restart; a ten-minute sweep removes orphan directories older than two hours. SQLite and uploads share the private volume. No media has a static-files mount.
+- CSP, nosniff, frame restrictions, Referrer-Policy, Permissions-Policy and COOP come from the application. HSTS is enabled after the certificate is verified. Request access logs are disabled; do not enable body, cookie, password or header logging.
 
-The existing environment is used directly; activation and dependency installation are unnecessary:
+## Runtime and local checks
 
-| Tool | Path / version used |
-| --- | --- |
-| Python | `/Users/aeon/aeon-env/bin/python` |
-| Uvicorn | `/Users/aeon/aeon-env/bin/uvicorn` |
-| FastAPI | 0.135.1 |
-| faster-whisper | 1.2.1 |
-| ffmpeg / ffprobe | `/opt/homebrew/bin/ffmpeg`, `/opt/homebrew/bin/ffprobe` |
-
-There are no frontend package dependencies. The UI loads IBM Plex Sans and Mono from Google Fonts, with system font fallbacks. A bounded streaming reader handles the single-file multipart upload; `python-multipart` is not needed. To run in the foreground instead:
+Python 3.12, FastAPI, Uvicorn, faster-whisper and ffmpeg/ffprobe are required. No frontend packages, external fonts, paid transcription or LLM services are used. Dependency additions need Luke's approval under the project rules.
 
 ```sh
-/Users/aeon/aeon-env/bin/uvicorn app:app --host 0.0.0.0 --port 8787
-```
-
-## Use it
-
-1. Drop a saved video into the upload box or select **Choose video**. Preparation starts immediately, with **Uploading → Finding cuts → Transcribing → Ready** stages.
-2. Select a thumbnail above the player to play that cut alone. Use the left/right arrow keys to select another cut and Enter to play it. Its duration and source time range appear beside the player, or below it on mobile. **Download cut** saves the selected MP4.
-3. Edit **Edit what you'll say**. Drafts and the selected cut survive refreshes in the same browser tab using session storage. **Reset transcript** restores Whisper's text. Copy your words before closing the tab; there is no long-term save or transcript-edit API. **New upload** returns to the upload box.
-
-Local paths remain available through `/api/analyze` for server-side smoke testing, outside the UI. Copy a video into `data/sample/` and submit its `filePath` as shown below. Server-side paths must resolve inside the project; uploads can come from anywhere on your device.
-
-Inputs: MP4, MOV/M4V, WebM/MKV and AVI; maximum 500 MiB and 10 minutes. One worker processes jobs in order, up to 100 jobs per server session and 200 cuts per video. The UI opens the cut sheet once preparation finishes, including when transcription falls back to empty text. Processing limits and timeouts favour short reels.
-
-## Exact hard-cut method
-
-ffmpeg decodes the first video stream and runs:
-
-```text
-setpts=PTS-STARTPTS,select='gt(scene,0.30)',showinfo
-```
-
-**Threshold: scene score strictly greater than 0.30.** This is ffmpeg's frame-change metric, not an AI model. `showinfo` reports each selected frame's `pts_time`; resetting timestamps makes those times relative to the source start. Keep time 0, accepted cut times, then the video-stream duration. Ignore candidates within **0.12 seconds** of the previous accepted boundary or the video end to suppress extremely short fragments. If there are no detected cuts, return the whole video as one clip.
-
-Each interval is re-encoded with accurate input seeking and an explicit duration: H.264 (`libx264`, `veryfast`, CRF 23, YUV420p) and AAC at 128 kbit/s, with `+faststart`. Stream copy is deliberately avoided so cuts do not depend on source keyframes. Dimensions are rounded down to even values for H.264 compatibility. Timing is accurate to the source frame grid; audio packet/container duration may differ slightly. The UI reports the source interval length, e.g. **4.53s**.
-
-This detects hard changes, including flashes and large camera movements. Similar-looking jump cuts may be missed and fades are not reliably detected. The fixed threshold is declared as `SCENE_THRESHOLD` in `app.py`; changing it changes both detection and the health endpoint.
-
-## Local speech recognition
-
-The whole video's audio is extracted to 16 kHz mono PCM. `faster-whisper` runs **base**, **CPU**, **int8**, beam size 5, voice activity detection and word timestamps. Each recognised word goes to the cut containing its timestamp midpoint, so words straddling a cut appear once. If word timestamps are unavailable, the segment midpoint is used. Language is detected automatically. Whisper can mishear speech, music and silence; edit its result.
-
-On the first audio-bearing video, the free open-source model weights download to `data/models/`; inference then runs locally. No video or audio is sent to a transcription service. Missing weights, offline mode or a transcription error produce a warning and empty editable transcripts while retaining all clips. Videos without an audio track skip Whisper. A single worker reuses the loaded model.
-
-Optional environment settings, set **before** starting:
-
-```sh
-export SPLICE_WHISPER_MODEL=base  # tiny / small also supported; restart to change
-export SPLICE_OFFLINE=1           # use cached weights only; never download
-./start.sh
-```
-
-Omit `SPLICE_OFFLINE` (or set it to `0`) to allow the first model download. Model/cache files created by the app live under gitignored `data/`. The smoke script always forces offline mode.
-
-## Instagram links are outside the public MVP
-
-Reel-link paste and cookie controls have been removed from the UI. `/api/analyze` rejects HTTP(S) URLs with HTTP 400 and directs users to Upload; it neither reads cookies nor starts a download. Public Instagram downloads must not route through this Mac. Mac browser cookies, cookie exports and browser-cookie routing are intentionally not used. Legacy downloader helpers remain unused. Upload a video you already have saved instead.
-
-## API
-
-```sh
-# Primary input: multipart upload, exactly one field named file, no extra form fields
-curl -sS http://127.0.0.1:8787/api/analyze-file \
-  -F 'file=@data/sample/hard-cuts.mp4'
-
-# Secondary input for server-side testing: local path relative to the project
-curl -sS http://127.0.0.1:8787/api/analyze \
-  -H 'Content-Type: application/json' \
-  -d '{"filePath":"data/sample/hard-cuts.mp4"}'
-
-curl -sS http://127.0.0.1:8787/api/jobs/JOB_ID
-```
-
-POST returns HTTP 202 after the upload is received and processing is queued. Poll GET `/api/jobs/{id}` until `complete` or `failed`. Statuses: `queued`, `processing`, `complete`, `failed`. All job responses include this shape, with additional progress, stage, warnings and error fields:
-
-```json
-{
-  "jobId": "example",
-  "status": "complete",
-  "cuts": [{
-    "id": "example-1",
-    "index": 1,
-    "start": 0.0,
-    "end": 4.53,
-    "duration": 4.53,
-    "videoUrl": "/media/example/clip-001.mp4",
-    "transcript": "The words in this beat."
-  }]
-}
-```
-
-GET `/` serves the UI, `/api/health` checks readiness, `/docs` provides FastAPI's API documentation (its interactive assets need internet), and `/media/...` serves only generated clips, including byte-range seeking. Original uploads, extracted speech and model files are not exposed. Local filenames and raw tool errors are not returned. Cross-origin browser submissions are rejected; the API is intended to be used from this UI or local command-line tools.
-
-## Checks and synthetic smoke
-
-```sh
-/Users/aeon/aeon-env/bin/python -m unittest discover -s tests -v
-./scripts/smoke_local.sh
-node --check static/app.js
+SPLICE_ENV=development SESSION_SECRET="$(python3 -c 'print("ab" * 32)')" python3 -m unittest discover -s tests -v
 node --test tests/test_ui.js
+node --check static/app.js
+node --check static/login.js
+node --check static/admin.js
+./scripts/smoke_local.sh
 sh -n start.sh stop.sh scripts/smoke_local.sh
+python3 scripts/audit_dependencies.py
 ```
 
-The smoke creates `data/sample/hard-cuts.mp4`: red → white → black, three 1.25-second vertical scenes. It exercises multipart upload first, then the local-path API using in-process HTTP (no listening socket), waits for completed jobs, verifies exactly three cuts, decodes every MP4, checks durations and the actual scene colours, and checks HTTP byte ranges. A second upload adds silent AAC audio to exercise the Whisper branch offline. Transcript strings must be present; empty synthetic transcripts are expected. If weights are uncached, it verifies the transcription warning/fallback instead of downloading anything. It prints the primary upload's job ID and cut count. Meaningful speech recognition needs a real spoken video and cached model weights or a first-run download.
+The smoke uses generated videos and synthetic identities in a temporary directory under this project. It opens no listening socket, downloads no model and uses no real secrets. It verifies scene timings/colours, authenticated original/cut range requests, transcript writes, hard deletion and rejected playlists. The auth runtime tests exercise real Argon2 sign-in, loopback HTTP cookies, account isolation and restart persistence; the broader security matrix uses a test double. `tests/test_scene_sample.py` probes the committed sample and verifies the missed 4.667-second Claude transition, nine clips and no tiny fragments, without network or Whisper.
 
-## Later: hosting away from the Mac
+`start.sh` is a developer-only loopback listener at `127.0.0.1:8787`; `stop.sh` checks its process identity. Set `SESSION_SECRET` (64–128 hex characters) and, on the first start only, `ADMIN_PASSWORD` (15–128 characters) for `lukesa100@gmail.com`, then run `./start.sh`. It sets `SPLICE_ENV=development` and defaults to `http://127.0.0.1:8787`; open that exact origin to sign in. Subsequent restarts need only the same session secret and existing database. An optional `SPLICE_ORIGIN` can select another loopback origin or an HTTPS proxy. Only explicit development on loopback HTTP uses a non-Secure `splice_dev_session` cookie; HTTPS and production retain the Secure prefixed cookies. `SPLICE_BASE_PATH=/tools` works locally too. Prefer the in-process smoke for routine verification. Never expose this listener to creators or point production DNS to a Mac, LAN IP, agent box or quick tunnel. Logs and runtime data stay ignored under `data/`.
 
-The current ship gate is Upload on the existing Mac tunnel. Restarting the running server and tunnel remains an operator task. A later Dockerfile could package Python, ffmpeg/ffprobe and the existing Python dependencies, replace the Mac-specific executable paths in `app.py`, run Uvicorn on the host's assigned port, and mount persistent storage at `data/` for clips and model weights. A container host such as Fly.io or Railway would need CPU/RAM for local Whisper and enough request time for uploads and background jobs. Keep a single worker while jobs live in memory. Hobby Vercel is outside this hosting plan. No container, hosting service or deployment is configured here.
+## Fly.io deployment plan — Luke operates after approval
 
-## Ephemeral data and limits
+**No deployment or paid resource creation is performed by this change.** The target is **`tools.madebyluke.co`**, on Fly.io with edge TLS, a single machine, two CPUs, 4 GiB RAM and a private persistent volume. Use one machine and one Uvicorn worker: queue capacity and SQLite transactions are intentionally single-machine. Running multiple replicas requires a shared queue/database and distributed limits first. A 30 GiB volume is a starting capacity for a small allowlist; monitor free space and increase it before adding more accounts. Retention is per user, not a global disk quota.
 
-`data/` is gitignored. Original files and extracted audio live in `data/jobs/<id>/`; clips live in `data/media/<id>/`; sample videos and model weights are also under `data/`. There is no automatic deletion. After stopping the server, old job/sample folders can be removed manually when no longer needed. Restarting drops job metadata, so old cards cannot be restored, though their files remain until you remove them. There is no authentication, payment, long-term storage, TikTok support, CapCut export or deployment configuration.
+The intended production listener is a size-limiting reverse proxy on port 8080, forwarding only to loopback Uvicorn. The Fly service sets `force_https = true`; the app does not redirect HTTP itself, avoiding redirect loops. Uvicorn proxy-header trust stays disabled. The internal proxy must overwrite client identity and forwarded-protocol headers using platform-supplied values; no direct route to Uvicorn is exposed. The unauthenticated health path is `/api/health` and contains no deployment details.
+
+1. Review the PR, resolve every pending verification gate, and approve hosting costs. Choose an available Fly app name in `fly.toml`; do not assume `splice-tools` is available.
+2. Create the Fly app and private volume in `lhr`. Attach the volume as `/data`. Initialise its owner for the non-root container user once, through the platform console. Keep the database/volume off public services. Disable extra machine creation (`fly deploy --ha=false`) and confirm exactly one machine before admitting traffic.
+3. Set secrets through Fly's encrypted secret store. Never create a real `.env`, pass secret literals in shell history, paste them into chat, commit them or put them in Dockerfile `ENV`.
+4. Deploy to the platform hostname with that HTTPS origin configured. Test health, login, cookies, cross-user media denial, upload bounds, decoding, restart persistence and the volume's permissions before adding custom DNS.
+5. Luke adds `tools.madebyluke.co` to Fly, uses Fly's displayed DNS/certificate instructions in Namecheap, and verifies the platform certificate. Do not assume a particular A/AAAA/CNAME value. Release unused dedicated public IPs through the platform after checking their use.
+6. Set `SPLICE_ORIGIN=https://tools.madebyluke.co` and `SPLICE_HSTS=1` once HTTPS is stable. Re-run the external checks below before giving creators access. HSTS then sends `max-age=63072000; includeSubDomains`.
+
+### Secrets and configuration
+
+| Setting | Purpose | Where |
+| --- | --- | --- |
+| `SESSION_SECRET` | At least 32 random bytes, hex encoded (64+ hex characters); HMAC key for session/rate-limit identifiers | Fly secret only |
+| `ADMIN_PASSWORD` | 15–128 character bootstrap password for the hard-bound admin; used only when the admin does not exist | Fly secret for first start; unset after bootstrap |
+| `SPLICE_ORIGIN` | Exact public HTTPS origin, no path | `fly.toml` / platform configuration |
+| `SPLICE_BASE_PATH` | Empty for subdomain; `/tools` for path deployment | `fly.toml` / platform configuration |
+| `SPLICE_DATA_DIR` | Private mounted volume, `/data` | `fly.toml` |
+| `SPLICE_HSTS` | `0` during certificate validation; `1` once stable | `fly.toml` |
+
+For Fly, securely pipe secret-manager output containing the required `NAME=value` records into **`fly secrets import --stage`**, then deploy. `fly secrets set` is also supported by the platform, but avoid literal secret arguments in shell history. Generate the session key in a password manager or a trusted secrets workflow; do not print it in logs. Use `fly secrets list` to check names, never values. Remove the seed with `fly secrets unset ADMIN_PASSWORD` after first login. Unsetting the seed does not change the stored password. Password changes use `POST /api/password` with the current and new password, CSRF header and session; they revoke every old session and issue a fresh one.
+
+Rotating `SESSION_SECRET` invalidates all session identifiers. Rotate it after a leak, rotate affected passwords and revoke sessions; inspect exposure before restoring access. There is no database URL or third-party API key in this SQLite/local-inference deployment. Any future secret must go through the same platform vault. Railway's equivalent is a **sealed variable**, but no Railway deployment is configured by this PR.
+
+For a future CI deployment, use an app-scoped deployment token stored in CI secrets, never a personal token. This change does not enable automatic deploys or create a token.
+
+### Optional `/tools` hosting
+
+The subdomain is preferred. If Luke chooses `https://madebyluke.co/tools` instead:
+
+- Set `SPLICE_ORIGIN=https://madebyluke.co` and **`SPLICE_BASE_PATH=/tools`**. This is the app's basePath: actual routes, media URLs, assets, login redirects and fetches all carry `/tools`.
+- Preserve that prefix through the trusted reverse proxy; do not strip it. Update the healthcheck to `/tools/api/health`.
+- The cookie becomes **`__Secure-splice_session; Path=/tools`**. On the subdomain it is **`__Host-splice_session; Path=/`**. Neither sets Domain. There is no CSRF cookie.
+- Cookie Path is not an XSS boundary. Keep every sibling app on the apex trusted; the subdomain offers a cleaner boundary. A second proxy must also preserve trustworthy platform client identity for rate limits; otherwise use a stricter shared-IP limit.
+
+### Offline Whisper and resource limits
+
+Provide the `base` faster-whisper model files under `/data/models/base` before enabling transcription. Fetch public model files in an explicit build/provisioning step, without a token, and verify their provenance. The running app never downloads models or contacts a transcription service. Without the model, cuts still complete and users can type their words. Verify a real spoken clip before release; a silent synthetic video cannot establish transcription accuracy.
+
+There is one reused model process and one ffmpeg pipeline. Each job has a 300-second overall deadline, ffprobe 20 seconds, individual ffmpeg operations at most 120 seconds and Whisper at most 180 seconds within that deadline. The Fly machine memory limit is the final bound on native decoders. Output clips plus source have a 400 MiB job budget; temporary speech is capped separately and deleted. Extremely complex videos can fail safely within these limits. No OS decoder sandbox or malware scanner is claimed; restricted input formats/protocols, private paths, non-root execution and current builds are required. Network-denied worker isolation and ClamAV are later hardening items.
+
+## Before public DNS / creator access
+
+Run every automated check, build and test the actual container, audit pinned dependencies and OS packages, and exercise real model inference. On the deployed platform hostname, verify TLS 1.2/1.3, request-size rejection at the proxy, spoofed-forward-header behaviour, persistent owner isolation across a restart, memory/time limits and storage cleanup. After Luke configures DNS, verify custom-domain TLS, both cookie flags and paths, HSTS and the remaining headers with `curl -I`; run SSL Labs and Mozilla Observatory. Check that no production route or service connects to a Mac or quick tunnel. Record observed results in `docs/security-verification.md`; do not mark these operator checks as passing from local tests.
+
+Authoritative deployment references: [Fly app configuration](https://fly.io/docs/reference/configuration/), [Fly request headers](https://fly.io/docs/networking/request-headers/) and [Fly secrets](https://fly.io/docs/apps/secrets/). Fly documents the source port as overwritten by its proxy and warns about trusting forwarded address chains; the application therefore avoids generic proxy-header trust.

@@ -1,3 +1,5 @@
+> **Superseded colour/input rules (Luke, 28 October 2026):** light mode only, blue branding; MP4/MOV/WebM only; Original first and New Video last in the strip, with one Continue confirmation. See `security-verification.md` for the current product locks. The older palette below is historical.
+
 # Splice UI Implementation Brief
 **For:** Matrix / Codex — ship tonight (static HTML/CSS/JS OK; no React unless already in repo)  
 **Product:** Splice — UGC pacing tool (upload-only)  

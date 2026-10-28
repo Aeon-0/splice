@@ -1,0 +1,43 @@
+# App name may need changing if splice-tools is taken on Fly.
+app = "splice-tools"
+primary_region = "lhr"
+kill_signal = "SIGTERM"
+kill_timeout = 330
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SPLICE_ENV = "production"
+  SPLICE_DATA_DIR = "/data"
+  SPLICE_ORIGIN = "https://madebyluke.co"
+  SPLICE_BASE_PATH = "/tools"
+  SPLICE_HSTS = "0"
+
+[[mounts]]
+  source = "splice_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "connections"
+    soft_limit = 30
+    hard_limit = 50
+
+  [[http_service.checks]]
+    grace_period = "45s"
+    interval = "30s"
+    method = "GET"
+    path = "/tools/api/health"
+    timeout = "5s"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 2
+  memory = "4gb"

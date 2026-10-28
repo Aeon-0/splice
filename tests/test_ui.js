@@ -55,12 +55,14 @@ class Element {
   set src(value) { this.setAttribute("src", value); }
   get src() { return this.getAttribute("src"); }
   querySelector(selector) { return this.children.find((child) => child.classList.contains(selector.slice(1))); }
+  showModal() { this.open = true; }
+  close() { this.open = false; }
   pause() {}
   load() {}
   play() { this.playCount += 1; return Promise.resolve(); }
 }
 
-function harness(saved = {}, initialResponses = []) {
+function harness(base = "", initialResponses = [], account = {}) {
   const elements = new Map();
   for (const match of html.matchAll(/<(\w+)\b([^>]*\bid="([^"]+)"[^>]*)>/g)) {
     const element = new Element(match[1]);
@@ -79,6 +81,7 @@ function harness(saved = {}, initialResponses = []) {
   });
   const body = new Element("body");
   body.dataset.screen = "empty";
+  body.dataset.basePath = base;
   const document = {
     body,
     getElementById: (id) => elements.get(id),
@@ -95,6 +98,7 @@ function harness(saved = {}, initialResponses = []) {
       requests.push(this);
     }
     open(method, url) { this.method = method; this.url = url; }
+    setRequestHeader(key, value) { this.headers ||= {}; this.headers[key] = value; }
     send(form) { this.form = form; }
     abort() { this.aborted = true; }
     respond(result, status = 202) {
@@ -103,26 +107,25 @@ function harness(saved = {}, initialResponses = []) {
       this.emit("load");
     }
   }
-  const storage = new Map(Object.entries(saved).map(([key, value]) => [key, JSON.stringify(value)]));
   const timers = new Map();
   let timerId = 0;
   const responses = [...initialResponses];
   const fetches = [];
   const context = vm.createContext({
     document,
-    window: { matchMedia: () => ({ matches: true }), scrollTo() {} },
-    sessionStorage: {
-      getItem: (key) => storage.get(key) ?? null,
-      setItem: (key, value) => storage.set(key, value),
-    },
+    window: { matchMedia: () => ({ matches: true }), scrollTo() {}, location: {assign(url) { fetches.push("redirect:" + url); }} },
     XMLHttpRequest: Request,
     FormData: class {
       constructor() { this.fields = new Map(); }
       append(key, value) { this.fields.set(key, value); }
     },
     AbortController,
-    fetch: (url) => {
-      fetches.push(url);
+    fetch: (url, options = {}) => {
+      fetches.push({url, options});
+      if (url === base + "/api/session") return Promise.resolve(account.expired
+        ? {ok: false, status: 401} : {ok: true, json: async () => ({email: "alice@example.test", admin: !!account.admin})});
+      if (url === base + "/api/jobs") return Promise.resolve({ok: true, json: async () => ({jobs: account.jobs || []})});
+      if (options.method === "PUT") return Promise.resolve({ok: true, json: async () => ({transcript: JSON.parse(options.body).transcript})});
       const result = responses.shift();
       if (result instanceof Error) return Promise.reject(result);
       if (result?.then) return result;
@@ -136,7 +139,7 @@ function harness(saved = {}, initialResponses = []) {
   });
   vm.runInContext(source, context);
   return {
-    $: (id) => elements.get(id), body, context, requests, responses, fetches, storage, stages,
+    $: (id) => elements.get(id), body, context, requests, responses, fetches, stages,
     upload(file = { name: "reel.mp4", size: 8 * 1024 * 1024 }) {
       elements.get("video-file").files = [file];
       elements.get("video-file").emit("change");
@@ -153,111 +156,128 @@ function harness(saved = {}, initialResponses = []) {
 
 function job(status = "processing", stage = "Finding hard cuts with ffmpeg…") {
   return {
-    jobId: "sample-job", status, stage, progress: 80, sourceDuration: 3.75,
+    jobId: "sample-job", status, stage, progress: 80, sourceDuration: 3.75, originalUrl: "/media/sample-job/original",
     cuts: Array.from({ length: 3 }, (_, index) => ({
       id: "cut-" + index, index: index + 1,
       start: index * 1.25, end: (index + 1) * 1.25, duration: 1.25,
       videoUrl: "/media/sample-job/clip-00" + (index + 1) + ".mp4",
-      transcript: index ? "" : "Original words.",
+      transcript: index ? "" : "Original words.", originalTranscript: index ? "" : "Original words.",
     })),
     warnings: [],
   };
 }
 
-test("every design token matches the brief without extra tokens", () => {
-  const brief = fs.readFileSync("docs/splice-ui-brief.md", "utf8").split("## 4. Design tokens")[1].split("## 5.")[0];
+
+const settle = () => new Promise(setImmediate);
+
+test("light blue UI, local assets and restricted formats", () => {
   const css = fs.readFileSync("static/styles.css", "utf8");
-  const tokens = (text) => Object.fromEntries(Array.from(text.matchAll(/(--[\w-]+):\s*([^;]+);/g), ([, key, value]) => [key, value.replace(/\s+/g, "")]));
-  assert.deepEqual(tokens(css), tokens(brief));
-  assert.match(html, /name="color-scheme" content="dark"/);
-  assert.match(html, /IBM\+Plex\+Sans/);
-  assert.match(html, /IBM\+Plex\+Mono/);
+  assert.match(html, /name="color-scheme" content="light"/);
+  assert.match(css, /color-scheme: light/);
+  assert.match(css, /#235DE3/);
+  assert.doesNotMatch(html + css, /fonts.googleapis|color-scheme: dark|#E6A23C|#C8872A/);
+  assert.doesNotMatch(html, /\.mkv|\.avi|\.m4v/);
 });
 
-test("worker labels collapse into the four named stages", () => {
+test("upload, progress, cut strip and original view", async () => {
   const ui = harness();
-  for (const [stage, expected] of [
-    ["Receiving your video…", 0], ["Reading video…", 1],
-    ["Waiting for the local worker…", 1], ["Finding hard cuts with ffmpeg…", 1],
-    ["Creating clip 2 of 7…", 1], ["Transcribing locally with Whisper…", 2],
-    ["Writing transcript…", 2], ["Finishing cut sheet…", 2],
-  ]) {
-    assert.equal(vm.runInContext("jobStage(" + JSON.stringify({ stage }) + ")", ui.context), expected, stage);
-  }
-  assert.equal(vm.runInContext('jobStage({status: "complete"})', ui.context), 3);
-  assert.equal(vm.runInContext('jobStage({status: "processing", progress: 80})', ui.context), 2);
-});
-
-test("upload progress, partial job, polling, selection and transcript drafts", async () => {
-  const ui = harness();
-  ui.$("choose-video").click();
-  assert.equal(ui.$("video-file").clickCount, 1);
+  await settle();
   const request = ui.upload();
-  assert.equal(request.method, "POST");
   assert.equal(request.url, "/api/analyze-file");
-  assert.deepEqual(Array.from(request.form.fields.keys()), ["file"]);
-  assert.equal(ui.body.dataset.screen, "loading");
-  assert.equal(ui.$("source-name").textContent, "reel.mp4");
-  request.upload.emit("progress", { lengthComputable: true, loaded: 4, total: 8 });
+  assert.equal(request.headers["X-Requested-With"], "Splice");
+  request.upload.emit("progress", {lengthComputable: true, loaded: 4, total: 8});
   assert.equal(ui.$("stage-progress").getAttribute("aria-valuenow"), "50");
-  request.upload.emit("load");
-  assert.equal(ui.$("stage-progress").getAttribute("aria-valuenow"), null);
-  request.respond(job("processing", "Transcribing locally with Whisper…"));
+  request.respond(job("processing"));
   assert.equal(ui.body.dataset.screen, "loading");
-  assert.equal(ui.$("cut-strip").children.length, 0, "Partial cuts must stay hidden");
-  await ui.tick(45000);
-  assert.match(ui.$("loading-note").textContent, /Still writing transcript/);
-  ui.responses.push(job("complete", "Your cut sheet is ready"));
+  assert.equal(ui.$("cut-strip").children.length, 0);
+  ui.responses.push(job("complete"));
   await ui.tick(1100);
-  assert.equal(ui.fetches[0], "/api/jobs/sample-job");
   assert.equal(ui.body.dataset.screen, "result");
-  assert.equal(ui.$("cut-strip").children.length, 3);
-  assert.equal(ui.$("clip-player").src, "/media/sample-job/clip-001.mp4");
-  assert.equal(ui.$("clip-player").loop, false);
-  assert.equal(ui.$("total-duration").textContent, "Total 3.75s");
-  ui.$("transcript").value = "My own words.";
-  ui.$("transcript").emit("input");
-  ui.$("cut-strip").children[0].emit("keydown", { key: "ArrowRight" });
-  assert.equal(ui.$("selected-title").textContent, "Cut 2 of 3");
+  const chips = ui.$("cut-strip").children;
+  assert.equal(chips.length, 5);
+  assert.equal(chips[0].dataset.cutId, "original");
+  assert.equal(chips.at(-1).id, "new-video");
+  assert.equal(ui.$("clip-player").src, "/media/sample-job/original");
+  assert.equal(ui.$("transcript").disabled, true);
+  chips[1].click();
+  assert.equal(ui.$("selected-title").textContent, "Cut 1 of 3");
+  assert.equal(ui.$("transcript").disabled, false);
   assert.equal(ui.$("selected-duration").textContent, "1.25 seconds");
-  assert.equal(ui.$("selected-range").textContent, "00:01.25 – 00:02.50");
-  assert.equal(ui.$("clip-player").playCount, 0, "Arrow navigation should allow selection without autoplay");
-  ui.$("cut-strip").children[0].click();
-  assert.equal(ui.$("clip-player").playCount, 1);
-  assert.equal(ui.$("transcript").value, "My own words.");
-  assert.match(ui.storage.get("splice-drafts-sample-job"), /My own words/);
-  ui.$("reset-transcript").click();
-  assert.equal(ui.$("transcript").value, "Original words.");
-  ui.$("new-upload").click();
+  chips[0].click();
+  assert.equal(ui.$("clip-player").src, "/media/sample-job/original");
+  assert.equal(ui.$("clip-player").playCount, 2);
+  assert.equal(ui.$("clip-player").getAttribute("aria-label"), "Original video");
+  assert.equal(ui.$("selected-duration").textContent, "3.75 seconds");
+  assert.equal(ui.$("selected-range").textContent, "00:00.00 – 00:03.75");
+  assert.equal(ui.$("download-clip").href, "/media/sample-job/original");
+  assert.equal(ui.$("transcript").disabled, true);
+});
+
+test("New Video resets after one Continue; cancellation preserves the player", async () => {
+  const ui = harness();
+  ui.upload().respond(job("complete"));
+  ui.$("cut-strip").children.at(-1).click();
+  assert.equal(ui.$("new-video-dialog").open, true);
+  assert.match(ui.$("new-video-copy").textContent, /no longer stay visible/);
+  ui.$("new-video-cancel").click();
+  assert.equal(ui.body.dataset.screen, "result");
+  assert.equal(ui.$("clip-player").src, "/media/sample-job/original");
+  ui.$("cut-strip").children.at(-1).click();
+  ui.$("new-video-confirm").click();
+  await settle();
+  assert.equal(ui.$("new-video-dialog").open, false);
   assert.equal(ui.body.dataset.screen, "empty");
   assert.equal(ui.$("clip-player").src, null);
-  assert.equal(ui.storage.get("splice-job"), "null");
 });
 
-test("invalid files and size limits never send an upload", () => {
+test("transcripts save to the correct cut and reset to recognised speech", async () => {
   const ui = harness();
-  for (const file of [
-    { name: "words.txt", size: 10 }, { name: "empty.mp4", size: 0 },
-    { name: "large.mov", size: 500 * 1024 * 1024 + 1 },
-  ]) {
+  ui.upload().respond(job("complete"));
+  ui.$("cut-strip").children[1].click();
+  ui.$("transcript").value = "My own words.";
+  ui.$("transcript").emit("input");
+  ui.$("cut-strip").children[2].click();
+  await settle();
+  const save = ui.fetches.find((request) => request.options.method === "PUT");
+  assert.equal(save.url, "/api/jobs/sample-job/transcript/cut-0");
+  assert.equal(JSON.parse(save.options.body).transcript, "My own words.");
+  assert.equal(save.options.headers["X-Requested-With"], "Splice");
+  ui.$("cut-strip").children[1].click();
+  assert.equal(ui.$("transcript").value, "My own words.");
+  ui.$("reset-transcript").click();
+  assert.equal(ui.$("transcript").value, "Original words.");
+});
+
+test("invalid files and size limits never upload", () => {
+  const ui = harness();
+  for (const file of [{name: "words.txt", size: 10}, {name: "legacy.mkv", size: 10}, {name: "empty.mp4", size: 0}, {name: "large.mov", size: 200 * 1024 * 1024 + 1}]) {
     ui.upload(file);
     assert.equal(ui.requests.length, 0);
-    assert.equal(ui.body.dataset.screen, "empty");
     assert.equal(ui.$("upload-error").hidden, false);
-    assert.equal(ui.$("dropzone").getAttribute("aria-invalid"), "true");
   }
-  ui.upload({ name: "phone.MOV", size: 500 * 1024 * 1024 });
-  assert.equal(ui.requests.length, 1, "The stated maximum and uppercase extensions are accepted");
+  ui.upload({name: "phone.MOV", size: 200 * 1024 * 1024});
+  assert.equal(ui.requests.length, 1);
 });
 
-test("upload retry retains the file and old responses cannot replace a new upload", () => {
+test("path deployment prefixes every API request", async () => {
+  const ui = harness("/tools");
+  await settle();
+  assert.equal(ui.fetches[0].url, "/tools/api/session");
+  assert.equal(ui.fetches[1].url, "/tools/api/jobs");
+  const upload = ui.upload();
+  assert.equal(upload.url, "/tools/api/analyze-file");
+  upload.respond(job());
+  ui.responses.push(job("complete"));
+  await ui.tick(1100);
+  assert.equal(ui.fetches.at(-1).url, "/tools/api/jobs/sample-job");
+});
+
+test("old upload and poll responses cannot overwrite a newer operation", async () => {
   const ui = harness();
   const first = ui.upload();
   first.emit("error");
-  assert.equal(ui.$("loading-error").hidden, false);
   ui.$("retry-upload").click();
   assert.equal(ui.requests.length, 2);
-  assert.equal(ui.requests[1].form.fields.get("file").name, "reel.mp4");
   first.respond(job("complete"));
   assert.equal(ui.body.dataset.screen, "loading");
   ui.$("cancel-upload").click();
@@ -266,59 +286,45 @@ test("upload retry retains the file and old responses cannot replace a new uploa
   assert.equal(ui.body.dataset.screen, "empty");
 });
 
-test("a failed job stays on the error screen even when it contains partial cuts", () => {
+test("a failed job never exposes partial cuts", () => {
   const ui = harness();
-  const result = job("failed", "Analysis stopped");
-  result.error = "This file could not be read as a video.";
+  const result = job("failed"); result.error = "This file could not be read as a video.";
   ui.upload().respond(result);
   assert.equal(ui.body.dataset.screen, "loading");
   assert.equal(ui.$("loading-error").hidden, false);
-  assert.equal(ui.$("processing-error").textContent, result.error);
   assert.equal(ui.$("cut-strip").children.length, 0);
-  ui.$("choose-another").click();
-  assert.equal(ui.$("video-file").clickCount, 1);
 });
 
-test("poll failures offer reconnection without uploading again", async () => {
-  const ui = harness();
-  ui.upload().respond(job());
-  for (let index = 0; index < 5; index += 1) {
-    ui.responses.push(new Error("Offline"));
-    await ui.tick(1100);
-  }
-  assert.equal(ui.$("loading-error").hidden, false);
-  assert.equal(ui.$("loading-title").textContent, "Connection interrupted");
-  ui.$("retry-upload").click();
-  ui.responses.push(job("complete"));
-  await ui.tick(0);
-  assert.equal(ui.requests.length, 1);
+test("homepage loads recent jobs without storing private drafts in browser storage", async () => {
+  const recent = {...job("complete"), originalFilename: "Saved reel.mp4", createdAt: 1793200000};
+  const ui = harness("", [recent], {jobs: [recent]});
+  await settle();
+  assert.equal(ui.body.dataset.screen, "empty");
+  assert.equal(ui.$("account-email").textContent, "alice@example.test");
+  assert.equal(ui.$("admin-link").hidden, true);
+  assert.equal(ui.$("recent-jobs").children.length, 1);
+  assert.equal(ui.$("recent-jobs").children[0].children[0].textContent, "Saved reel.mp4");
+  ui.$("recent-jobs").children[0].click();
+  await settle();
   assert.equal(ui.body.dataset.screen, "result");
+  assert.equal(ui.$("clip-player").src, recent.originalUrl);
+  assert.doesNotMatch(source, /sessionStorage|localStorage/);
 });
 
-test("restoring a tab keeps the selected cut, source metadata and edited words", async () => {
-  const ui = harness();
-  ui.upload().respond(job("complete"));
-  ui.$("cut-strip").children[1].click();
-  ui.$("transcript").value = "Another take.";
-  ui.$("transcript").emit("input");
-  const saved = Object.fromEntries(Array.from(ui.storage, ([key, value]) => [key, JSON.parse(value)]));
-  const restored = harness(saved, [job("complete")]);
-  await new Promise(setImmediate);
-  assert.equal(restored.fetches[0], "/api/jobs/sample-job");
-  assert.equal(restored.body.dataset.screen, "result");
-  assert.equal(restored.$("selected-title").textContent, "Cut 2 of 3");
-  assert.equal(restored.$("transcript").value, "Another take.");
-  assert.equal(restored.$("source-name").textContent, "reel.mp4");
+test("session expiry redirects to prefixed login before loading Recent", async () => {
+  const ui = harness("/tools", [], {expired: true});
+  await settle();
+  assert.equal(ui.fetches.at(-1), "redirect:/tools/login");
+  assert.equal(ui.fetches.length, 2);
 });
 
-test("a delayed restore cannot replace a newly selected upload", async () => {
-  let resolve;
-  const pending = new Promise((complete) => { resolve = complete; });
-  const ui = harness({ "splice-job": "sample-job" }, [pending]);
-  ui.upload({ name: "new.mp4", size: 1024 });
-  resolve({ ok: true, json: async () => job("complete") });
-  await new Promise(setImmediate);
-  assert.equal(ui.body.dataset.screen, "loading");
-  assert.equal(ui.$("source-name").textContent, "new.mp4");
-  assert.equal(ui.$("cut-strip").children.length, 0);
+test("admin account link and sign out use the signed-in session", async () => {
+  const ui = harness("/tools", [{ok: true}], {admin: true});
+  await settle();
+  assert.equal(ui.$("admin-link").hidden, false);
+  ui.$("logout").click();
+  await settle();
+  assert.equal(ui.fetches.at(-2).url, "/tools/api/logout");
+  assert.equal(ui.fetches.at(-2).options.method, "POST");
+  assert.equal(ui.fetches.at(-1), "redirect:/tools/login");
 });

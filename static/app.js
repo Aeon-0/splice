@@ -1,9 +1,11 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const BASE = document.body.dataset.basePath || "";
+const apiPath = (path) => BASE + path;
 const STAGES = ["Uploading", "Finding cuts", "Transcribing", "Ready"];
-const VIDEO_SUFFIXES = new Set(["mp4", "mov", "webm", "m4v", "mkv", "avi"]);
-const MAX_BYTES = 500 * 1024 * 1024;
+const VIDEO_SUFFIXES = new Set(["mp4", "mov", "webm"]);
+const MAX_BYTES = 200 * 1024 * 1024;
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 let job = null;
 let selectedId = null;
@@ -23,17 +25,82 @@ let thumbnailObserver = null;
 let thumbnailQueue = [];
 let thumbnailCancel = null;
 
-function store(key, value) {
+let saveTimer = null;
+let pendingSave = null;
+let saves = Promise.resolve(true);
+
+async function api(path, options = {}) {
+  const response = await fetch(apiPath(path), {cache: "no-store", ...options,
+    headers: {"X-Requested-With": "Splice", "Content-Type": "application/json", ...(options.headers || {})}});
+  if (response.status === 401) { window.location.assign(apiPath("/login")); throw new Error("Please sign in again."); }
+  const result = await response.json();
+  if (!response.ok) throw new Error(responseError(result));
+  return result;
+}
+function queueSave() {
+  if (!job || selectedId === "original") return;
+  clearTimeout(saveTimer);
+  if (pendingSave && (pendingSave.id !== selectedId || pendingSave.jobId !== job.jobId)) flushSave();
+  pendingSave = {jobId: job.jobId, id: selectedId, transcript: $("transcript").value, operation};
+  $("draft-note").textContent = "Saving…";
+  saveTimer = setTimeout(flushSave, 500);
+}
+function flushSave() {
+  clearTimeout(saveTimer);
+  const item = pendingSave;
+  if (!item) return saves;
+  pendingSave = null;
+  saves = saves.then(async () => {
+    try {
+      await api("/api/jobs/" + encodeURIComponent(item.jobId) + "/transcript/" + encodeURIComponent(item.id),
+        {method: "PUT", body: JSON.stringify({transcript: item.transcript})});
+      if (item.operation === operation) $("draft-note").textContent = "Saved privately to this video.";
+      return true;
+    } catch (error) {
+      if (item.operation === operation) $("draft-note").textContent = "Not saved. " + error.message + " Copy your words before leaving.";
+      if (!pendingSave) pendingSave = item;
+      return false;
+    }
+  });
+  return saves;
+}
+async function loadRecent() {
   try {
-    sessionStorage.setItem(key, JSON.stringify(value));
-    return true;
-  } catch {
-    return false;
-  }
+    const result = await api("/api/jobs");
+    $("recent-jobs").replaceChildren();
+    for (const item of result.jobs) {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "recent-job";
+      const title = document.createElement("strong"); title.textContent = item.originalFilename || "Uploaded video";
+      const meta = document.createElement("span"); meta.textContent = new Date(item.createdAt * 1000).toLocaleDateString("en-GB") + " · " + (item.status === "complete" ? item.cuts.length + " cuts" : item.status);
+      button.append(title, meta);
+      button.addEventListener("click", () => openJob(item.jobId));
+      $("recent-jobs").append(button);
+    }
+    message("recent-error", result.jobs.length ? "" : "Your videos will appear here.");
+  } catch (error) { message("recent-error", error.message); }
 }
-function retrieve(key, fallback) {
-  try { return JSON.parse(sessionStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+async function openJob(id) {
+  if (!await flushSave()) return;
+  stopWork();
+  const token = operation;
+  try {
+    const result = await fetchJob(id);
+    if (token !== operation) return;
+    drafts = {}; selectedId = null; currentStage = -1;
+    $("source-name").textContent = result.originalFilename || "Uploaded video";
+    $("source-size").textContent = "";
+    renderJob(result);
+    if (!["complete", "failed"].includes(result.status)) schedulePoll(id, token);
+  } catch (error) { message("recent-error", error.message); }
 }
+function newVideo() {
+  $("new-video-title").textContent = "Start a new video?";
+  $("new-video-copy").textContent = "The current video will no longer stay visible in this workspace. You can reopen it from Recent videos while it is within your latest 10.";
+  $("new-video-confirm").textContent = "Continue";
+  $("new-video-dialog").showModal();
+}
+
 function message(id, value) {
   $(id).textContent = value || "";
   $(id).hidden = !value;
@@ -63,6 +130,7 @@ function clearThumbnails() {
   thumbnailCancel?.();
 }
 function stopWork() {
+  flushSave();
   operation += 1;
   clearTimeout(pollTimer);
   clearTimeout(slowTimer);
@@ -89,8 +157,9 @@ function resetWorkspace() {
   $("dropzone").classList.remove("is-invalid", "is-dragging");
   $("dropzone").removeAttribute("aria-invalid");
   message("upload-error", "");
-  store("splice-job", null);
+
   setScreen("empty");
+  loadRecent();
 }
 function chooseVideo() {
   $("video-file").value = "";
@@ -104,11 +173,12 @@ function invalidFile(text) {
 }
 function acceptFiles(files) {
   if (files.length !== 1) return invalidFile("Choose one video at a time.");
+  if (document.body.dataset.screen === "result") return newVideo();
   const file = files[0];
   const suffix = file.name.split(".").pop().toLowerCase();
-  if (!VIDEO_SUFFIXES.has(suffix)) return invalidFile("Use an MP4, MOV, WEBM, M4V, MKV or AVI video.");
+  if (!VIDEO_SUFFIXES.has(suffix)) return invalidFile("Use an MP4, MOV or WebM video.");
   if (!file.size) return invalidFile("This file is empty. Choose a video with something in it.");
-  if (file.size > MAX_BYTES) return invalidFile("Choose a video up to 500 MiB and no longer than 10 minutes.");
+  if (file.size > MAX_BYTES) return invalidFile("Choose a video up to 200 MiB and no longer than 5 minutes.");
   startUpload(file);
 }
 
@@ -199,7 +269,7 @@ function startUpload(file) {
   currentStage = -1;
   failed = false;
   pollingFailures = 0;
-  store("splice-job", null);
+
   $("dropzone").classList.remove("is-invalid", "is-dragging");
   $("dropzone").removeAttribute("aria-invalid");
   message("upload-error", "");
@@ -214,7 +284,9 @@ function startUpload(file) {
   form.append("file", file);
   const request = new XMLHttpRequest();
   uploadRequest = request;
-  request.open("POST", "/api/analyze-file");
+  request.open("POST", apiPath("/api/analyze-file"));
+  request.setRequestHeader("X-Requested-With", "Splice");
+  request.timeout = 300000;
   request.upload.addEventListener("progress", (event) => {
     if (token !== operation || currentStage !== 0) return;
     if (event.lengthComputable && event.total) {
@@ -232,10 +304,9 @@ function startUpload(file) {
     try { result = JSON.parse(request.responseText); } catch {
       return showFailure("The server returned an unexpected response. Try again.");
     }
+    if (request.status === 401) return window.location.assign(apiPath("/login"));
     if (request.status < 200 || request.status >= 300) return showFailure(responseError(result));
     if (typeof result?.jobId !== "string") return showFailure("The upload was received without a job reference. Try again.");
-    store("splice-job", result.jobId);
-    store("splice-source-" + result.jobId, { name: file.name, size: file.size });
     renderJob(result);
     if (!["complete", "failed"].includes(result.status)) schedulePoll(result.jobId, token);
   });
@@ -253,9 +324,10 @@ async function fetchJob(id) {
   pollController = controller;
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch("/api/jobs/" + encodeURIComponent(id), { signal: controller.signal, cache: "no-store" });
+    const response = await fetch(apiPath("/api/jobs/" + encodeURIComponent(id)), { signal: controller.signal, cache: "no-store" });
     let result;
     try { result = await response.json(); } catch { throw new Error("The server returned an unexpected response."); }
+    if (response.status === 401) window.location.assign(apiPath("/login"));
     if (!response.ok) throw new Error(responseError(result));
     return result;
   } finally {
@@ -316,9 +388,13 @@ function renderResult() {
     return warning;
   });
   message("result-warning", warnings.join(" "));
-  const saved = retrieve("splice-selection-" + job.jobId, null);
-  selectedId = job.cuts.some((cut) => cut.id === saved) ? saved : job.cuts[0].id;
+  selectedId = selectedId && job.cuts.some((cut) => cut.id === selectedId) ? selectedId : "original";
   $("cut-strip").replaceChildren();
+  const original = document.createElement("button");
+  original.type = "button"; original.className = "cut-card"; original.dataset.cutId = "original";
+  original.textContent = "Original · " + seconds(total);
+  original.addEventListener("click", () => selectCut("original", true));
+  $("cut-strip").append(original);
   const thumbnails = [];
   for (const [index, cut] of job.cuts.entries()) {
     const button = document.createElement("button");
@@ -367,7 +443,7 @@ function renderResult() {
       else return;
       event.preventDefault();
       selectCut(job.cuts[target].id, false);
-      $("cut-strip").children[target].focus({ preventScroll: true });
+      $("cut-strip").children[target + 1].focus({ preventScroll: true });
     });
     $("cut-strip").append(button);
     const thumb = cut.thumb || cut.thumbnailUrl;
@@ -376,23 +452,32 @@ function renderResult() {
       img.src = thumb;
     } else thumbnails.push({ cut, img, button });
   }
+  const add = document.createElement("button");
+  add.type = "button"; add.className = "cut-card new-video-card"; add.id = "new-video";
+  const plus = document.createElement("span"); plus.textContent = "+"; plus.setAttribute("aria-hidden", "true");
+  const label = document.createElement("strong"); label.textContent = "New Video";
+  add.append(plus, label); add.addEventListener("click", newVideo);
+  $("cut-strip").append(add);
   setScreen("result");
   selectCut(selectedId, false);
   observeThumbnails(thumbnails);
 }
 function selectCut(id, play) {
   const index = job?.cuts.findIndex((cut) => cut.id === id) ?? -1;
-  if (index < 0) return;
-  const cut = job.cuts[index];
+  if (!job || (index < 0 && id !== "original")) return;
+  flushSave();
+  const original = id === "original";
+  const cut = original ? {videoUrl: job.originalUrl, duration: job.sourceDuration, start: 0, end: job.sourceDuration,
+    transcript: job.cuts.map((item) => item.transcript).filter(Boolean).join(" ")} : job.cuts[index];
   selectedId = id;
-  store("splice-selection-" + job.jobId, id);
+
   for (const card of $("cut-strip").children) {
     const selected = card.dataset.cutId === id;
     card.setAttribute("aria-pressed", String(selected));
-    card.tabIndex = selected ? 0 : -1;
+    card.tabIndex = 0;
     if (selected) card.scrollIntoView({ block: "nearest", inline: "nearest", behavior: reducedMotion.matches ? "auto" : "smooth" });
   }
-  $("selected-title").textContent = "Cut " + (index + 1) + " of " + job.cuts.length;
+  $("selected-title").textContent = original ? "Original video" : "Cut " + (index + 1) + " of " + job.cuts.length;
   $("selected-duration").textContent = Number(cut.duration).toFixed(2) + " seconds";
   $("selected-range").textContent = timestamp(cut.start) + " – " + timestamp(cut.end);
   const player = $("clip-player");
@@ -403,15 +488,18 @@ function selectCut(id, play) {
     player.load();
   }
   player.loop = false;
-  player.setAttribute("aria-label", "Cut " + (index + 1) + " of " + job.cuts.length);
+  player.setAttribute("aria-label", original ? "Original video" : "Cut " + (index + 1) + " of " + job.cuts.length);
   if (play) {
     if (player.ended) player.currentTime = 0;
     player.play().catch(() => { /* Native controls remain available when autoplay is blocked. */ });
   }
   $("download-clip").href = cut.videoUrl;
-  $("download-clip").download = "splice-cut-" + String(index + 1).padStart(2, "0") + ".mp4";
   $("transcript").value = drafts[id] ?? cut.transcript ?? "";
-  $("previous-cut").disabled = index === 0;
+  $("transcript").disabled = original;
+  $("download-clip").textContent = original ? "Download original ↓" : "Download cut ↓";
+  $("download-clip").download = original ? "splice-original" + (job.sourceSuffix || ".mp4") : "splice-cut-" + (index + 1) + ".mp4";
+  $("draft-note").textContent = original ? "Select a cut to edit its transcript." : "Edits are saved privately to this video.";
+  $("previous-cut").disabled = index <= 0;
   $("next-cut").disabled = index === job.cuts.length - 1;
   updateDraftMeta();
 }
@@ -419,8 +507,8 @@ function updateDraftMeta() {
   const words = $("transcript").value.trim().split(/\s+/).filter(Boolean).length;
   const edited = Object.hasOwn(drafts, selectedId);
   $("word-count").textContent = words + (words === 1 ? " word" : " words");
-  $("draft-state").textContent = edited ? "Your draft · this tab" : "Original transcript";
-  $("reset-transcript").disabled = !edited;
+  $("draft-state").textContent = edited ? "Your words" : "Original transcript";
+  $("reset-transcript").disabled = selectedId === "original" || !edited;
 }
 function adjacentCut(offset) {
   const index = job.cuts.findIndex((cut) => cut.id === selectedId) + offset;
@@ -523,7 +611,17 @@ document.addEventListener("dragover", (event) => {
 document.addEventListener("drop", (event) => {
   if (Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault();
 });
-$("new-upload").addEventListener("click", resetWorkspace);
+$("home").addEventListener("click", async () => { if (await flushSave()) resetWorkspace(); });
+$("logout").addEventListener("click", async () => {
+  if (!await flushSave()) return;
+  try { await api("/api/logout", {method: "POST"}); window.location.assign(apiPath("/login")); }
+  catch (error) { message("result-warning", error.message); }
+});
+$("new-video-cancel").addEventListener("click", () => $("new-video-dialog").close());
+$("new-video-confirm").addEventListener("click", async () => {
+  if (!await flushSave()) { $("new-video-dialog").close(); return; }
+  $("new-video-dialog").close(); resetWorkspace();
+});
 $("cancel-upload").addEventListener("click", resetWorkspace);
 $("choose-another").addEventListener("click", chooseVideo);
 $("retry-upload").addEventListener("click", () => {
@@ -542,14 +640,18 @@ $("retry-upload").addEventListener("click", () => {
 $("transcript").addEventListener("input", () => {
   if (!job || !selectedId) return;
   drafts[selectedId] = $("transcript").value;
-  const saved = store("splice-drafts-" + job.jobId, drafts);
-  $("draft-note").textContent = saved ? "Edits are saved in this browser tab." : "Edits stay on this page. Copy your words before leaving.";
+  const cut = job.cuts.find((item) => item.id === selectedId);
+  if (cut) cut.transcript = $("transcript").value;
+  queueSave();
   updateDraftMeta();
 });
 $("reset-transcript").addEventListener("click", () => {
-  delete drafts[selectedId];
-  store("splice-drafts-" + job.jobId, drafts);
+  const cut = job.cuts.find((item) => item.id === selectedId);
+  if (!cut) return;
+  cut.transcript = cut.originalTranscript || "";
+  drafts[selectedId] = cut.transcript;
   selectCut(selectedId, false);
+  queueSave();
 });
 $("previous-cut").addEventListener("click", () => adjacentCut(-1));
 $("next-cut").addEventListener("click", () => adjacentCut(1));
@@ -560,25 +662,16 @@ $("replay-cut").addEventListener("click", () => {
 });
 $("clip-player").addEventListener("error", () => {
   if (document.body.dataset.screen === "result" && $("clip-player").getAttribute("src")) {
-    message("player-error", "This cut could not be played in this browser. Download the cut to watch it, or choose another video.");
+    const name = selectedId === "original" ? "original video" : "cut";
+    message("player-error", "This " + name + " could not be played in this browser. Download it to watch it, or choose another video.");
   }
 });
 
-(async function restoreJob() {
-  const id = retrieve("splice-job", null);
-  if (typeof id !== "string") return;
-  const token = operation;
+(async function initialise() {
   try {
-    const result = await fetchJob(id);
-    if (token !== operation) return;
-    const savedDrafts = retrieve("splice-drafts-" + id, {});
-    drafts = savedDrafts && typeof savedDrafts === "object" && !Array.isArray(savedDrafts) ? savedDrafts : {};
-    const source = retrieve("splice-source-" + id, null);
-    $("source-name").textContent = source?.name || "Previous upload";
-    $("source-size").textContent = typeof source?.size === "number" ? fileSize(source.size) : "";
-    renderJob(result);
-    if (!["complete", "failed"].includes(result.status)) schedulePoll(id, token);
-  } catch {
-    if (token === operation) store("splice-job", null);
-  }
+    const session = await api("/api/session");
+    $("account-email").textContent = session.email;
+    $("admin-link").hidden = !session.admin;
+    await loadRecent();
+  } catch (error) { message("recent-error", error.message); }
 })();

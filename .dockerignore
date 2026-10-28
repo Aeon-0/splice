@@ -1,0 +1,17 @@
+*
+!app.py
+!config.py
+!storage.py
+!security.py
+!passwords.py
+!uploads.py
+!pipeline.py
+!transcript.py
+!whisper_worker.py
+!static/
+!static/**
+!deploy/
+!deploy/**
+!requirements.txt
+!requirements.lock
+!Dockerfile

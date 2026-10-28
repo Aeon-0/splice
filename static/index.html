@@ -3,24 +3,20 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="color-scheme" content="dark">
-  <meta name="theme-color" content="#0E0D0C">
+  <meta name="color-scheme" content="light">
+  <meta name="theme-color" content="#F5F8FF">
   <title>Splice — Your cut sheet</title>
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%230E0D0C'/%3E%3Cpath d='M23 9H13a4 4 0 0 0 0 8h6a3 3 0 0 1 0 6H9' fill='none' stroke='%23F4F0E8' stroke-width='3'/%3E%3C/svg%3E">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600&amp;display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/static/styles.css">
-  <script src="/static/app.js" defer></script>
+  <link rel="stylesheet" href="__BASE__/static/styles.css">
+  <script src="__BASE__/static/app.js" defer></script>
 </head>
-<body data-screen="empty">
+<body data-screen="empty" data-base-path="__BASE__">
   <header class="top-bar">
-    <span class="wordmark">Splice</span>
-    <button id="new-upload" class="text-button" type="button">New upload</button>
+    <button id="home" class="wordmark text-button" type="button">Splice<span class="brand-dot">.</span></button>
+    <nav aria-label="Account"><span id="account-email" class="account-email"></span><a id="admin-link" href="__BASE__/admin" class="text-button" hidden>Manage access</a><button id="logout" class="text-button" type="button">Sign out</button></nav>
   </header>
 
   <main>
-    <input id="video-file" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-m4v,video/x-matroska,video/x-msvideo,.mp4,.mov,.webm,.m4v,.mkv,.avi" aria-label="Choose a video" hidden>
+    <input id="video-file" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" aria-label="Choose a video" hidden>
 
     <section id="screen-empty" class="screen centred-screen" aria-labelledby="empty-title">
       <div class="upload-layout">
@@ -28,13 +24,14 @@
           <svg class="upload-glyph" width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
             <path d="M16 22V5m-6 6 6-6 6 6M6 21v6h20v-6"/>
           </svg>
-          <h1 id="empty-title">Drop a reel here</h1>
+          <h1 id="empty-title">Make every cut count</h1>
           <button id="choose-video" class="primary-button" type="button">Choose video</button>
-          <p id="upload-formats" class="upload-formats">MP4 · MOV · WEBM · M4V · MKV · AVI</p>
-          <p id="upload-limits" class="upload-limits">Up to 500 MiB · max 10 minutes</p>
+          <p id="upload-formats" class="upload-formats">MP4 · MOV · WEBM</p>
+          <p id="upload-limits" class="upload-limits">Up to 200 MiB · 5 minutes · 1920 × 1920</p>
         </div>
         <p id="upload-error" class="error-message" role="alert" hidden></p>
-        <p class="upload-helper">Download the reel first, then upload.</p>
+        <p class="upload-helper">Your video. Each cut. Room for your own words.</p>
+        <section class="recent-section" aria-labelledby="recent-title"><h2 id="recent-title">Recent videos</h2><p class="retention-note">Your latest 10 videos. Older videos and their cuts are deleted automatically.</p><div id="recent-jobs" class="recent-jobs"></div><p id="recent-error" class="error-message" role="status" hidden></p></section>
         <noscript><p class="error-message">Enable JavaScript to upload and view your cut sheet.</p></noscript>
       </div>
     </section>
@@ -62,7 +59,7 @@
             <button id="choose-another" class="secondary-button" type="button">Choose another video</button>
           </div>
         </div>
-        <button id="cancel-upload" class="text-button cancel-button" type="button">New upload</button>
+        <button id="cancel-upload" class="text-button cancel-button" type="button">Back to videos</button>
       </div>
     </section>
 
@@ -95,9 +92,9 @@
           </div>
           <div class="transcript-panel">
             <label for="transcript">Edit what you'll say</label>
-            <textarea id="transcript" placeholder="No speech detected — type the line you'll record." spellcheck="true" aria-describedby="draft-note"></textarea>
+            <textarea id="transcript" placeholder="No speech detected — type the line you'll record." spellcheck="true" aria-describedby="draft-note" maxlength="20000"></textarea>
             <div class="draft-meta"><span id="draft-state">Original transcript</span><span id="word-count">0 words</span></div>
-            <p id="draft-note" class="draft-note">Edits are saved in this browser tab.</p>
+            <p id="draft-note" class="draft-note">Edits are saved privately to this video.</p>
             <div class="transcript-actions">
               <button id="reset-transcript" class="text-button" type="button" disabled>Reset transcript</button>
               <a id="download-clip" class="text-button" download>Download cut ↓</a>
@@ -106,6 +103,10 @@
         </div>
       </div>
     </section>
+    <dialog id="new-video-dialog" aria-labelledby="new-video-title" aria-describedby="new-video-copy">
+      <h2 id="new-video-title">Start a new video?</h2><p id="new-video-copy">The current video will no longer stay visible in this workspace. You can reopen it from Recent videos while it is within your latest 10.</p>
+      <div class="dialog-actions"><button id="new-video-cancel" class="secondary-button" type="button">Keep this video</button><button id="new-video-confirm" class="primary-button" type="button">Continue</button></div>
+    </dialog>
   </main>
 </body>
 </html>
