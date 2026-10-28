@@ -20,30 +20,18 @@
       <section class="intro">
         <p class="eyebrow">A little structure for your next big idea</p>
         <h1>Find the beats.<br class="mobile-break"> <span>Make them yours.</span></h1>
-        <p>Turn a reel into individual clips. Watch each beat, then write your own take.</p>
+        <p>Upload a reel or video from your phone or computer. Watch each beat, then write your own take.</p>
       </section>
 
       <section class="source-panel" aria-label="Choose a source video">
         <div class="source-tabs" role="tablist" aria-label="Video source">
-          <button type="button" id="tab-reel" role="tab" aria-selected="true" aria-controls="panel-reel" data-mode="reel">↗ <span>Reel link</span></button>
-          <button type="button" id="tab-upload" role="tab" aria-selected="false" aria-controls="panel-upload" tabindex="-1" data-mode="upload">↑ <span>Upload</span></button>
-          <button type="button" id="tab-path" role="tab" aria-selected="false" aria-controls="panel-path" tabindex="-1" data-mode="path">⌘ <span>Local path</span></button>
+          <button type="button" id="tab-upload" role="tab" aria-selected="true" aria-controls="panel-upload">↑ <span>Upload</span></button>
         </div>
         <form id="source-form">
-          <div id="panel-reel" role="tabpanel" aria-labelledby="tab-reel">
-            <label for="reel-url">Public Instagram reel</label>
-            <div class="input-row"><input id="reel-url" name="url" type="url" placeholder="https://www.instagram.com/reel/…" autocomplete="off" spellcheck="false"><button class="primary analyse-button" type="submit">Find the cuts <span aria-hidden="true">→</span></button></div>
-            <details class="cookies-details"><summary>Instagram asking you to log in?</summary><label for="cookies-path">Optional cookies file on this server, outside the repo</label><input id="cookies-path" type="text" placeholder="/Users/aeon/secrets/instagram-cookies.txt" autocomplete="off" spellcheck="false"><p>Use a Netscape cookies.txt export. Your cookie file stays on the server. See the README for the steps.</p></details>
-          </div>
-          <div id="panel-upload" role="tabpanel" aria-labelledby="tab-upload" hidden>
+          <div id="panel-upload" role="tabpanel" aria-labelledby="tab-upload">
             <label for="video-file">Upload a video from your device</label>
             <div class="input-row"><input id="video-file" type="file" accept=".mp4,.mov,.m4v,.webm,.mkv,.avi,video/*"><button class="primary analyse-button" type="submit">Find the cuts <span aria-hidden="true">→</span></button></div>
             <p class="field-note">MP4, MOV, M4V, WebM, MKV or AVI · Up to 500 MiB and 10 minutes</p>
-          </div>
-          <div id="panel-path" role="tabpanel" aria-labelledby="tab-path" hidden>
-            <label for="local-path">Video path on this server, inside the project</label>
-            <div class="input-row"><input id="local-path" type="text" placeholder="data/sample/hard-cuts.mp4" autocomplete="off" spellcheck="false"><button class="primary analyse-button" type="submit">Find the cuts <span aria-hidden="true">→</span></button></div>
-            <p class="field-note">Relative to the project, or an absolute path inside it. For other locations, use Upload.</p>
           </div>
         </form>
         <div class="source-footer"><span><span class="tiny-wave" aria-hidden="true">▥</span> ffmpeg cuts · Local Whisper transcripts</span><span>No account needed</span></div>
@@ -59,8 +47,8 @@
       <section id="empty-state" class="empty-state">
         <div class="empty-art" aria-hidden="true"><div class="mini-card one"><i></i><i></i></div><div class="mini-card two"><span>▶</span></div><div class="mini-card three"><i></i><i></i><i></i></div><span class="art-spark">✳</span></div>
         <h2>Your next reel starts here</h2>
-        <p>Add a video above and we’ll break it into a stack of cuts.<br>One clip, one idea, one take at a time.</p>
-        <div class="steps"><span><b>01</b> Add a reel</span><span aria-hidden="true">→</span><span><b>02</b> Explore the cuts</span><span aria-hidden="true">→</span><span><b>03</b> Write your take</span></div>
+        <p>Upload a video above and we’ll break it into a stack of cuts.<br>One clip, one idea, one take at a time.</p>
+        <div class="steps"><span><b>01</b> Upload a video</span><span aria-hidden="true">→</span><span><b>02</b> Explore the cuts</span><span aria-hidden="true">→</span><span><b>03</b> Write your take</span></div>
       </section>
 
       <section id="workspace" class="workspace" aria-label="Your cut sheet" hidden>

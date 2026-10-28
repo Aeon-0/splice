@@ -78,27 +78,28 @@ def main():
         assert client.get("/").status_code == 200
         assert client.get("/static/app.js").status_code == 200
         assert client.get("/api/health").json()["sceneThreshold"] == 0.3
-        local = wait_for_job(client, client.post("/api/analyze", json={"filePath": "data/sample/hard-cuts.mp4"}))
-        verify(client, local)
         with sample.open("rb") as video:
             uploaded = wait_for_job(client, client.post("/api/analyze-file", files={"file": ("hard-cuts.mp4", video, "video/mp4")}))
         cuts = verify(client, uploaded)
+        local = wait_for_job(client, client.post("/api/analyze", json={"filePath": "data/sample/hard-cuts.mp4"}))
+        verify(client, local)
         # Exercise the audio/Whisper branch with silent audio, still strictly offline.
         silent = sample_dir / "silent-audio.mp4"
         subprocess.run([
             app.FFMPEG, "-nostdin", "-v", "error", "-y", "-i", str(sample), "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
             "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-shortest", str(silent),
         ], check=True, capture_output=True)
-        audio_result = wait_for_job(client, client.post("/api/analyze", json={"url": "data/sample/silent-audio.mp4"}))
+        with silent.open("rb") as video:
+            audio_result = wait_for_job(client, client.post("/api/analyze-file", files={"file": ("silent-audio.mp4", video, "video/mp4")}))
         verify(client, audio_result)
         assert all(cut["transcript"] == "" for cut in local["cuts"])
-        print("PASS: local path, multipart upload, queued jobs, 3 accurate scene clips, MP4 decoding, clip colours and HTTP byte ranges.")
-        print("PASS: silent-audio job completed offline; transcript strings present on every cut.")
+        print("PASS: multipart upload, local path, queued jobs, 3 accurate scene clips, MP4 decoding, clip colours and HTTP byte ranges.")
+        print("PASS: silent-audio upload completed offline; transcript strings present on every cut.")
         if audio_result["warnings"]:
             print("Whisper: no cached model available; graceful empty-transcript fallback verified. No model download attempted.")
         else:
             print("Whisper: cached local model ran successfully on silent audio.")
-        print(json.dumps({"jobId": uploaded["jobId"], "durations": [cut["duration"] for cut in cuts]}))
+        print(json.dumps({"jobId": uploaded["jobId"], "status": uploaded["status"], "cutCount": len(cuts), "durations": [cut["duration"] for cut in cuts]}))
 
 
 if __name__ == "__main__":

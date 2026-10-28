@@ -1,7 +1,6 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
-let mode = "reel";
 let job = null;
 let selectedId = null;
 let drafts = {};
@@ -31,29 +30,6 @@ function setBusy(value) {
     button.firstChild.textContent = value ? "Working locally… " : "Find the cuts ";
   });
 }
-function setMode(nextMode, focus = false) {
-  mode = nextMode;
-  document.querySelectorAll("[data-mode]").forEach((button) => {
-    const active = button.dataset.mode === mode;
-    button.setAttribute("aria-selected", String(active));
-    button.tabIndex = active ? 0 : -1;
-    const panel = $(`panel-${button.dataset.mode}`);
-    panel.hidden = !active;
-    panel.querySelectorAll("input").forEach((input) => { input.disabled = !active; });
-    if (active && focus) button.focus();
-  });
-}
-document.querySelectorAll("[data-mode]").forEach((button, index, buttons) => {
-  button.addEventListener("click", () => setMode(button.dataset.mode));
-  button.addEventListener("keydown", (event) => {
-    if (!["ArrowRight", "ArrowLeft", "Home", "End"].includes(event.key)) return;
-    event.preventDefault();
-    const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1 : (index + (event.key === "ArrowRight" ? 1 : -1) + buttons.length) % buttons.length;
-    setMode(buttons[next].dataset.mode, true);
-  });
-});
-setMode(mode);
-
 async function api(url, options) {
   const response = await fetch(url, options);
   let payload;
@@ -67,32 +43,20 @@ $("source-form").addEventListener("submit", async (event) => {
   if (busy) return;
   message("error-message", "");
   message("warning-message", "");
-  let endpoint = "/api/analyze";
-  let options;
-  if (mode === "upload") {
-    const file = $("video-file").files[0];
-    if (!file) return message("error-message", "Choose a video to upload first.");
-    if (file.size > 500 * 1024 * 1024) return message("error-message", "Choose a video smaller than 500 MiB.");
-    const form = new FormData();
-    form.append("file", file);
-    endpoint = "/api/analyze-file";
-    options = { method: "POST", body: form };
-  } else {
-    const value = $(mode === "reel" ? "reel-url" : "local-path").value.trim();
-    if (!value) return message("error-message", mode === "reel" ? "Paste a public Instagram reel URL first." : "Enter a video path first.");
-    const body = mode === "reel" ? { url: value } : { filePath: value };
-    if (mode === "reel" && $("cookies-path").value.trim()) body.cookiesPath = $("cookies-path").value.trim();
-    options = { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
-  }
+  const file = $("video-file").files[0];
+  if (!file) return message("error-message", "Choose a video to upload first.");
+  if (file.size > 500 * 1024 * 1024) return message("error-message", "Choose a video smaller than 500 MiB.");
+  const form = new FormData();
+  form.append("file", file);
   setBusy(true);
   $("clip-player").pause();
   clearTimeout(pollTimer);
   $("job-status").hidden = false;
-  $("status-label").textContent = mode === "upload" ? "Uploading your video…" : "Starting your cut sheet…";
+  $("status-label").textContent = "Uploading your video…";
   $("status-percentage").textContent = "";
   $("job-progress").removeAttribute("value");
   try {
-    const result = await api(endpoint, options);
+    const result = await api("/api/analyze-file", { method: "POST", body: form });
     selectedId = null;
     drafts = {};
     store("splice-job", result.jobId);

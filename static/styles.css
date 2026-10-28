@@ -276,31 +276,6 @@ input::file-selector-button {
   line-height:1;
 }
 
-.cookies-details {
-  font-size:11px;
-  color:var(--muted);
-  margin-top:13px;
-}
-
-.cookies-details summary {
-  cursor:pointer;
-  width:fit-content;
-}
-
-.cookies-details[open] summary {
-  margin-bottom:14px;
-}
-
-.cookies-details input {
-  width:100%;
-  font-size:12px;
-}
-
-.cookies-details p {
-  line-height:1.6;
-  margin-bottom:0;
-}
-
 .field-note {
   font-size:11px;
   color:var(--muted);

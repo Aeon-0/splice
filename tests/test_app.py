@@ -78,6 +78,21 @@ class ValidationTests(unittest.TestCase):
             self.assertEqual(client.post("/api/analyze", json={}, headers={"Origin": "http://testserver"}).status_code, 400)
             self.assertEqual(client.get("/media/../jobs/example/source.upload").status_code, 404)
 
+    def test_reel_requests_require_upload_before_cookies_or_job_creation(self):
+        with TestClient(app.app) as client, \
+                patch.object(app, "cookies_file") as cookies, \
+                patch.object(app, "new_job") as new_job, \
+                patch.object(app, "download_reel") as download:
+            for url in ("https://www.instagram.com/reel/abc_12/", "http://instagram.com/reel/abc_12/", "https://example.com/video.mp4"):
+                with self.subTest(url=url):
+                    response = client.post("/api/analyze", json={"url": url})
+                    self.assertEqual(response.status_code, 400)
+                    self.assertIn("Upload", response.json()["detail"])
+                    self.assertIn("/api/analyze-file", response.json()["detail"])
+            cookies.assert_not_called()
+            new_job.assert_not_called()
+            download.assert_not_called()
+
 
 class TimelineTests(unittest.TestCase):
     def test_ffmpeg_boundary_debounce_and_endpoints(self):

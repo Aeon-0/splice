@@ -1,4 +1,4 @@
-"""Local, ephemeral Instagram cut sheets. No model is used to find cuts."""
+"""Local, ephemeral cut sheets from uploaded videos. No model is used to find cuts."""
 
 from __future__ import annotations
 
@@ -165,17 +165,18 @@ def get_job(job_id: str):
 
 
 @app.post("/api/analyze", status_code=202)
-def analyse(body: AnalyseInput, request: Request, cookiesPath: str | None = None):
+def analyse(body: AnalyseInput, request: Request):
     if bool(body.url) == bool(body.filePath):
-        raise HTTPException(400, "Provide one reel URL or one local filePath.")
+        raise HTTPException(400, "Upload a video, or provide one local filePath for server-side testing.")
     value = (body.filePath or body.url or "").strip()
     if not value:
         raise HTTPException(400, "Choose a video first.")
     is_url = not body.filePath and value.lower().startswith(("http://", "https://"))
-    source = instagram_url(value) if is_url else local_video(value)
-    cookies = cookies_file(body.cookiesPath or cookiesPath or os.environ.get("SPLICE_COOKIES") or os.environ.get("UGC_CUTS_COOKIES") or os.environ.get("RESPLICE_COOKIES") or os.environ.get("PACEAI_COOKIES")) if is_url else None
+    if is_url:
+        raise HTTPException(400, "Reel link downloads are outside the MVP. Upload a video from your phone or computer using Upload (/api/analyze-file).")
+    source = local_video(value)
     job_id = new_job()
-    request.app.state.worker.submit(process_job, job_id, source, is_url, cookies)
+    request.app.state.worker.submit(process_job, job_id, source, False, None)
     return snapshot(job_id)
 
 

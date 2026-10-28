@@ -1,6 +1,6 @@
 # Splice
 
-Paste a public Instagram reel URL, get separate MP4s for its hard cuts, and write your own words beside each beat. A mobile-friendly single page plays each selected clip on its own and shows its duration to two decimal places. Cut detection uses **ffmpeg only**. Local Whisper supplies an editable starting transcript; there is no script rewriting, LLM, paid API or vision model.
+Upload a reel or video from your phone or computer, get separate MP4s for its hard cuts, and write your own words beside each beat. **Upload is the only input in the MVP UI.** A mobile-friendly single page plays each selected clip on its own and shows its duration to two decimal places. Cut detection uses **ffmpeg only**. Local Whisper supplies an editable starting transcript; there is no script rewriting, LLM, paid API or vision model.
 
 ## Start and stop
 
@@ -26,7 +26,6 @@ The existing environment is used directly; activation and dependency installatio
 | FastAPI | 0.135.1 |
 | faster-whisper | 1.2.1 |
 | ffmpeg / ffprobe | `/opt/homebrew/bin/ffmpeg`, `/opt/homebrew/bin/ffprobe` |
-| yt-dlp | `/Users/aeon/aeon-env/bin/yt-dlp` |
 
 There are no frontend dependencies, remote fonts or CDNs. A bounded streaming reader handles the single-file multipart upload; `python-multipart` is not needed. To run in the foreground instead:
 
@@ -36,10 +35,11 @@ There are no frontend dependencies, remote fonts or CDNs. A bounded streaming re
 
 ## Use it
 
-1. Choose **Reel link**, paste a public `https://www.instagram.com/reel/.../` URL and select **Find the cuts**.
-2. If Instagram fails, use **Upload**, or copy a video into `data/sample/` and enter `data/sample/video.mp4` under **Local path**. Server-side paths must resolve inside the project; uploads can come from anywhere on your device.
-3. Select a cut card to play that MP4 alone. Its duration and source time range appear beside it. Download an individual clip with **Download clip**.
-4. Edit **Your words**. Drafts survive refreshes in the same browser tab using session storage. **Reset to transcript** restores Whisper's text. Copy your words before closing the tab; there is no long-term save or transcript-edit API.
+1. **Upload** is selected when the page opens. Choose a video saved on your phone or computer, then select **Find the cuts**.
+2. Select a cut card to play that MP4 alone. Its duration and source time range appear beside it. Download an individual clip with **Download clip**.
+3. Edit **Your words**. Drafts survive refreshes in the same browser tab using session storage. **Reset to transcript** restores Whisper's text. Copy your words before closing the tab; there is no long-term save or transcript-edit API.
+
+Local paths remain available through `/api/analyze` for server-side smoke testing, outside the UI. Copy a video into `data/sample/` and submit its `filePath` as shown below. Server-side paths must resolve inside the project; uploads can come from anywhere on your device.
 
 Inputs: MP4, MOV/M4V, WebM/MKV and AVI; maximum 500 MiB and 10 minutes. One worker processes jobs in order, up to 100 jobs per server session and 200 cuts per video. The UI shows clips before transcription finishes. Processing limits and timeouts favour short reels.
 
@@ -73,42 +73,21 @@ export SPLICE_OFFLINE=1           # use cached weights only; never download
 
 Omit `SPLICE_OFFLINE` (or set it to `0`) to allow the first model download. Model/cache files created by the app live under gitignored `data/`. The smoke script always forces offline mode.
 
-## Instagram and cookies
+## Instagram links are outside the public MVP
 
-Public reels can still require login, fail under rate limits, be geo/age restricted, or break when Instagram changes. Private reels are outside this MVP. yt-dlp downloads the video only when the app is run; the coding-session checks do not contact Instagram. User/global yt-dlp configuration is ignored for predictable behaviour.
-
-If the public download fails:
-
-1. Open the reel in a browser where you are already signed into Instagram and confirm it plays.
-2. Use a browser cookie-export tool you trust that exports the **Netscape cookies.txt** format. Export the cookies for `instagram.com`, rather than all sites. A JSON export is not compatible. Treat the export as a login credential.
-3. Save it **outside the repository**, for example `/Users/aeon/secrets/instagram-cookies.txt`. Do not paste cookie contents into the UI, shell history, chat or a commit.
-4. Enter its absolute path under **Instagram asking you to log in?** in the UI. The path refers to this server, even when using the UI from your phone. Alternatively set:
-
-   ```sh
-   export SPLICE_COOKIES=/Users/aeon/secrets/instagram-cookies.txt
-   ./start.sh
-   ```
-
-5. Retry the reel. Re-export if the session expires. If Instagram still blocks it, use Upload or Local path.
-
-API callers may pass `cookiesPath` in the JSON body or as a query parameter on `/api/analyze`. Precedence is body → query → environment. Paths inside the repository are rejected. Cookies are handed to yt-dlp, never included in responses or served under `/media`. Raw downloader errors are suppressed to avoid exposing account details. yt-dlp may update the supplied cookies file as part of its normal operation. No cookies or credentials are supplied with this project.
+Reel-link paste and cookie controls have been removed from the UI. `/api/analyze` rejects HTTP(S) URLs with HTTP 400 and directs users to Upload; it neither reads cookies nor starts a download. Public Instagram downloads must not route through this Mac. Mac browser cookies, cookie exports and browser-cookie routing are intentionally not used. Legacy downloader helpers remain unused. Upload a video you already have saved instead.
 
 ## API
 
 ```sh
-# Reel (requires network when you run it)
-curl -sS http://127.0.0.1:8787/api/analyze \
-  -H 'Content-Type: application/json' \
-  -d '{"url":"https://www.instagram.com/reel/REEL_ID/"}'
+# Primary input: multipart upload, exactly one field named file, no extra form fields
+curl -sS http://127.0.0.1:8787/api/analyze-file \
+  -F 'file=@data/sample/hard-cuts.mp4'
 
-# Server-side local path, relative to the project (also accepted in url)
+# Secondary input for server-side testing: local path relative to the project
 curl -sS http://127.0.0.1:8787/api/analyze \
   -H 'Content-Type: application/json' \
   -d '{"filePath":"data/sample/hard-cuts.mp4"}'
-
-# Multipart upload: exactly one field named file, no extra form fields
-curl -sS http://127.0.0.1:8787/api/analyze-file \
-  -F 'file=@data/sample/hard-cuts.mp4'
 
 curl -sS http://127.0.0.1:8787/api/jobs/JOB_ID
 ```
@@ -142,7 +121,11 @@ node --check static/app.js
 sh -n start.sh stop.sh scripts/smoke_local.sh
 ```
 
-The smoke creates `data/sample/hard-cuts.mp4`: red → white → black, three 1.25-second vertical scenes. It exercises both local-path and multipart APIs using in-process HTTP (no listening socket), waits for completed jobs, verifies exactly three cuts, decodes every MP4, checks durations and the actual scene colours, and checks HTTP byte ranges. A second fixture adds silent AAC audio to exercise the Whisper branch offline. Transcript strings must be present; empty synthetic transcripts are expected. If weights are uncached, it verifies the transcription warning/fallback instead of downloading anything. Meaningful speech recognition needs a real spoken video and cached model weights or a first-run download.
+The smoke creates `data/sample/hard-cuts.mp4`: red → white → black, three 1.25-second vertical scenes. It exercises multipart upload first, then the local-path API using in-process HTTP (no listening socket), waits for completed jobs, verifies exactly three cuts, decodes every MP4, checks durations and the actual scene colours, and checks HTTP byte ranges. A second upload adds silent AAC audio to exercise the Whisper branch offline. Transcript strings must be present; empty synthetic transcripts are expected. If weights are uncached, it verifies the transcription warning/fallback instead of downloading anything. It prints the primary upload's job ID and cut count. Meaningful speech recognition needs a real spoken video and cached model weights or a first-run download.
+
+## Later: hosting away from the Mac
+
+The current ship gate is Upload on the existing Mac tunnel. Restarting the running server and tunnel remains an operator task. A later Dockerfile could package Python, ffmpeg/ffprobe and the existing Python dependencies, replace the Mac-specific executable paths in `app.py`, run Uvicorn on the host's assigned port, and mount persistent storage at `data/` for clips and model weights. A container host such as Fly.io or Railway would need CPU/RAM for local Whisper and enough request time for uploads and background jobs. Keep a single worker while jobs live in memory. Hobby Vercel is outside this hosting plan. No container, hosting service or deployment is configured here.
 
 ## Ephemeral data and limits
 
