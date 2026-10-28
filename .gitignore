@@ -6,6 +6,8 @@ __pycache__/
 .venv/
 cookies.txt
 *.cookies
+*cookies*.txt
+*.cookies.txt
 .DS_Store
 node_modules/
 .jobs/

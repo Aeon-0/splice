@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f6f5f1">
+  <title>Splice — Find the beats. Make them yours.</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%23734cf5'/%3E%3Cpath d='M12 10v20m8-16v12m8-16v20' stroke='white' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="site-header">
+      <a class="brand" href="/" aria-label="Splice home"><span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span><b>Splice</b></a>
+      <span class="local-badge"><span></span> Your local workspace</span>
+    </header>
+
+    <main>
+      <section class="intro">
+        <p class="eyebrow">A little structure for your next big idea</p>
+        <h1>Find the beats.<br class="mobile-break"> <span>Make them yours.</span></h1>
+        <p>Turn a reel into individual clips. Watch each beat, then write your own take.</p>
+      </section>
+
+      <section class="source-panel" aria-label="Choose a source video">
+        <div class="source-tabs" role="tablist" aria-label="Video source">
+          <button type="button" id="tab-reel" role="tab" aria-selected="true" aria-controls="panel-reel" data-mode="reel">↗ <span>Reel link</span></button>
+          <button type="button" id="tab-upload" role="tab" aria-selected="false" aria-controls="panel-upload" tabindex="-1" data-mode="upload">↑ <span>Upload</span></button>
+          <button type="button" id="tab-path" role="tab" aria-selected="false" aria-controls="panel-path" tabindex="-1" data-mode="path">⌘ <span>Local path</span></button>
+        </div>
+        <form id="source-form">
+          <div id="panel-reel" role="tabpanel" aria-labelledby="tab-reel">
+            <label for="reel-url">Public Instagram reel</label>
+            <div class="input-row"><input id="reel-url" name="url" type="url" placeholder="https://www.instagram.com/reel/…" autocomplete="off" spellcheck="false"><button class="primary analyse-button" type="submit">Find the cuts <span aria-hidden="true">→</span></button></div>
+            <details class="cookies-details"><summary>Instagram asking you to log in?</summary><label for="cookies-path">Optional cookies file on this server, outside the repo</label><input id="cookies-path" type="text" placeholder="/Users/aeon/secrets/instagram-cookies.txt" autocomplete="off" spellcheck="false"><p>Use a Netscape cookies.txt export. Your cookie file stays on the server. See the README for the steps.</p></details>
+          </div>
+          <div id="panel-upload" role="tabpanel" aria-labelledby="tab-upload" hidden>
+            <label for="video-file">Upload a video from your device</label>
+            <div class="input-row"><input id="video-file" type="file" accept=".mp4,.mov,.m4v,.webm,.mkv,.avi,video/*"><button class="primary analyse-button" type="submit">Find the cuts <span aria-hidden="true">→</span></button></div>
+            <p class="field-note">MP4, MOV, M4V, WebM, MKV or AVI · Up to 500 MiB and 10 minutes</p>
+          </div>
+          <div id="panel-path" role="tabpanel" aria-labelledby="tab-path" hidden>
+            <label for="local-path">Video path on this server, inside the project</label>
+            <div class="input-row"><input id="local-path" type="text" placeholder="data/sample/hard-cuts.mp4" autocomplete="off" spellcheck="false"><button class="primary analyse-button" type="submit">Find the cuts <span aria-hidden="true">→</span></button></div>
+            <p class="field-note">Relative to the project, or an absolute path inside it. For other locations, use Upload.</p>
+          </div>
+        </form>
+        <div class="source-footer"><span><span class="tiny-wave" aria-hidden="true">▥</span> ffmpeg cuts · Local Whisper transcripts</span><span>No account needed</span></div>
+      </section>
+
+      <section id="job-status" class="job-status" aria-live="polite" hidden>
+        <div class="status-line"><span id="status-label"></span><span id="status-percentage"></span></div>
+        <progress id="job-progress" max="100" value="0" aria-label="Analysis progress"></progress>
+      </section>
+      <p id="error-message" class="notice error" role="alert" hidden></p>
+      <p id="warning-message" class="notice warning" role="status" hidden></p>
+
+      <section id="empty-state" class="empty-state">
+        <div class="empty-art" aria-hidden="true"><div class="mini-card one"><i></i><i></i></div><div class="mini-card two"><span>▶</span></div><div class="mini-card three"><i></i><i></i><i></i></div><span class="art-spark">✳</span></div>
+        <h2>Your next reel starts here</h2>
+        <p>Add a video above and we’ll break it into a stack of cuts.<br>One clip, one idea, one take at a time.</p>
+        <div class="steps"><span><b>01</b> Add a reel</span><span aria-hidden="true">→</span><span><b>02</b> Explore the cuts</span><span aria-hidden="true">→</span><span><b>03</b> Write your take</span></div>
+      </section>
+
+      <section id="workspace" class="workspace" aria-label="Your cut sheet" hidden>
+        <aside class="cut-stack">
+          <div class="stack-heading"><h2>Your cut sheet <span id="cut-count">0</span></h2><p id="total-duration"></p></div>
+          <div id="cut-list" class="cut-list" aria-label="Choose a clip"></div>
+        </aside>
+        <section class="editor" aria-label="Selected clip">
+          <div class="editor-header"><div><p class="eyebrow">One beat at a time</p><h2 id="selected-title">Cut 01</h2></div><span id="selected-duration" class="duration-badge">0.00s</span></div>
+          <div class="editor-body">
+            <div class="preview-column"><div class="player-frame"><video id="clip-player" controls playsinline preload="metadata" aria-label="Selected cut video"></video></div><div class="clip-meta"><span id="selected-range"></span><a id="download-clip" download>Download clip ↓</a></div></div>
+            <div class="transcript-column"><div class="transcript-heading"><label for="transcript">Your words</label><button id="reset-transcript" type="button" class="text-button">Reset to transcript</button></div><p class="transcript-help">Start with the transcript. Rewrite it as something you’d actually say.</p><textarea id="transcript" placeholder="No speech in this beat? Write what you’ll say here." spellcheck="true"></textarea><div class="draft-meta"><span id="draft-state">Original transcript</span><span id="word-count">0 words</span></div><p class="draft-note">Edits stay in this browser tab. Copy your words before closing it.</p><div class="beat-navigation"><button id="previous-cut" type="button">← Previous</button><button id="next-cut" type="button">Next cut →</button></div></div>
+          </div>
+        </section>
+      </section>
+    </main>
+    <footer class="site-footer"><span>Made for the way creators work.</span><span>Hard cuts, human ideas.</span></footer>
+  </div>
+</body>
+</html>
