@@ -27,6 +27,9 @@ class Settings:
 
     @property
     def cookie_name(self):
+        # Dev always uses unprefixed name so HTTPS quick tunnels keep sessions.
+        if not self.production:
+            return "splice_dev_session"
         if not self.cookie_secure:
             return "splice_dev_session"
         return "__Secure-splice_session" if self.base_path else "__Host-splice_session"
@@ -34,8 +37,9 @@ class Settings:
     @property
     def cookie_secure(self):
         parsed = urlsplit(self.origin)
-        return not (not self.production and parsed.scheme == "http"
-                    and parsed.hostname in {"localhost", "127.0.0.1", "::1"})
+        if not self.production:
+            return parsed.scheme == "https"
+        return True
 
     def url(self, path):
         return self.base_path + path

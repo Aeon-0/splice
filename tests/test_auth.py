@@ -85,7 +85,7 @@ class AuthRuntimeTests(unittest.TestCase):
             with patch.dict(os.environ, {"SPLICE_ORIGIN": "https://madebyluke.co", "SPLICE_BASE_PATH": "/tools"}):
                 settings = Settings.from_env()
                 self.assertTrue(settings.cookie_secure)
-                self.assertEqual(settings.cookie_name, "__Secure-splice_session")
+                self.assertEqual(settings.cookie_name, "splice_dev_session")
 
 
 if __name__ == "__main__":
