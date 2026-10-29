@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from starlette.concurrency import run_in_threadpool
 
 from config import ADMIN_EMAIL, ROOT, Settings
@@ -150,6 +150,26 @@ def create_app(settings=None):
     @application.get(base + "/api/jobs/{job_id}")
     def get_job(job_id: str, request: Request):
         return present_job(application.state.store.job(request.state.user["id"], job_id))
+
+    @application.get(base + "/api/jobs/{job_id}/activity")
+    def job_activity(job_id: str, request: Request):
+        store = application.state.store
+        owner = request.state.user["id"]
+        store.job(owner, job_id)  # Authorise before sending streaming headers.
+
+        async def activity():
+            # A continuous proxied connection prevents Fly's single Machine
+            # from looking idle between polls. This ends on browser disconnect.
+            while True:
+                payload = await run_in_threadpool(store.job, owner, job_id)
+                if payload["status"] not in ("uploading", "queued", "processing"):
+                    yield "data: done\n\n"
+                    return
+                yield ": preparing\n\n"
+                await asyncio.sleep(5)
+
+        return StreamingResponse(activity(), media_type="text/event-stream",
+                                 headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"})
 
     @application.delete(base + "/api/jobs/{job_id}")
     def delete_job(job_id: str, request: Request):

@@ -14,6 +14,7 @@ let drafts = {};
 let operation = 0;
 let uploadRequest = null;
 let pollController = null;
+let jobConnection = null;
 let pollTimer = null;
 let slowTimer = null;
 let pollingFailures = 0;
@@ -145,6 +146,8 @@ function stopWork() {
   clearTimeout(slowTimer);
   pollController?.abort();
   pollController = null;
+  jobConnection?.close();
+  jobConnection = null;
   uploadRequest?.abort();
   uploadRequest = null;
   clearThumbnails();
@@ -368,6 +371,18 @@ function schedulePoll(id, token = operation, delay = 1100) {
 }
 function renderJob(result) {
   job = result;
+  if (["complete", "failed"].includes(result.status)) {
+    jobConnection?.close();
+    jobConnection = null;
+  } else if (!jobConnection) {
+    // Polls update the UI; this uninterrupted connection keeps Fly awake.
+    const connection = new EventSource(apiPath("/api/jobs/" + encodeURIComponent(result.jobId) + "/activity"));
+    jobConnection = connection;
+    connection.onmessage = () => {
+      connection.close();
+      if (jobConnection === connection) jobConnection = null;
+    };
+  }
   if (result.status === "failed") {
     currentStage = Math.max(currentStage, jobStage(result));
     return showFailure(result.error || "This video could not be processed. Retry or choose another video.");

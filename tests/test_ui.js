@@ -120,6 +120,7 @@ function harness(base = "", initialResponses = [], account = {}) {
   let timerId = 0;
   const responses = [...initialResponses];
   const fetches = [];
+  const connections = [];
   const context = vm.createContext({
     document,
     window: { matchMedia: () => ({ matches: true }), scrollTo() {}, location: {assign(url) { fetches.push("redirect:" + url); }} },
@@ -129,6 +130,10 @@ function harness(base = "", initialResponses = [], account = {}) {
       append(key, value) { this.fields.set(key, value); }
     },
     AbortController,
+    EventSource: class {
+      constructor(url) { this.url = url; connections.push(this); }
+      close() { this.closed = true; }
+    },
     fetch: (url, options = {}) => {
       fetches.push({url, options});
       if (url === base + "/api/session") return Promise.resolve(account.expired
@@ -148,7 +153,7 @@ function harness(base = "", initialResponses = [], account = {}) {
   });
   vm.runInContext(source, context);
   return {
-    $: (id) => elements.get(id), body, context, requests, responses, fetches, stages, created,
+    $: (id) => elements.get(id), body, context, requests, responses, fetches, stages, created, connections,
     upload(file = { name: "reel.mp4", size: 8 * 1024 * 1024 }) {
       elements.get("video-file").files = [file];
       elements.get("video-file").emit("change");
@@ -178,6 +183,30 @@ function job(status = "processing", stage = "Finding hard cuts with ffmpeg…") 
 
 
 const settle = () => new Promise(setImmediate);
+
+test("processing holds one connection and releases it on completion or leaving", async () => {
+  const ui = harness("/tools");
+  ui.upload().respond(job());
+  assert.equal(ui.connections.length, 1);
+  assert.equal(ui.connections[0].url, "/tools/api/jobs/sample-job/activity");
+  ui.responses.push(job());
+  await ui.tick(1100);
+  assert.equal(ui.connections.length, 1);
+  assert.ok(!ui.connections[0].closed);
+  ui.responses.push(job("complete"));
+  await ui.tick(1100);
+  assert.ok(ui.connections[0].closed);
+  ui.upload().respond(job());
+  ui.$("cancel-upload").click();
+  assert.ok(ui.connections[1].closed);
+});
+
+test("terminal activity event closes the connection even if polling fails", () => {
+  const ui = harness();
+  ui.upload().respond(job());
+  ui.connections[0].onmessage({data: "done"});
+  assert.ok(ui.connections[0].closed);
+});
 
 test("email-only login opens the app or waiting page and handles failures", async () => {
   const loginSource = fs.readFileSync("static/login.js", "utf8");

@@ -8,7 +8,7 @@ import unittest
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -243,6 +243,47 @@ class SecurityTests(unittest.TestCase):
         self.store.new_job(self.users["bob@example.test"])
         self.assertRaises(HTTPException, self.store.new_job, self.users[ADMIN_EMAIL])
         self.store.update(self.users["alice@example.test"], job, status="failed")
+
+    def test_job_activity_requires_login_and_ownership(self):
+        job_id = self.fixture_job()
+        path = f"/api/jobs/{job_id}/activity"
+        self.assertEqual(self.client.get(path).status_code, 401)
+        self.login()
+        self.assertEqual(self.client.get(path).status_code, 404)
+        self.login("bob@example.test")
+        response = self.client.get(path)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["x-accel-buffering"], "no")
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertEqual(response.text, "data: done\n\n")
+
+    def test_job_activity_stays_open_until_processing_finishes(self):
+        owner = self.users["alice@example.test"]
+        job_id = self.store.new_job(owner)
+        endpoint = next(route.endpoint for route in self.application.routes
+                        if route.path == "/api/jobs/{job_id}/activity")
+        request = SimpleNamespace(state=SimpleNamespace(user={"id": owner}))
+
+        async def check():
+            response = endpoint(job_id, request)
+            stream = response.body_iterator
+            with patch("app.asyncio.sleep", new_callable=AsyncMock):
+                for status in ("uploading", "queued", "processing"):
+                    self.store.update(owner, job_id, status=status)
+                    self.assertEqual(await anext(stream), ": preparing\n\n")
+                self.store.update(owner, job_id, status="complete")
+                self.assertEqual(await anext(stream), "data: done\n\n")
+                with self.assertRaises(StopAsyncIteration):
+                    await anext(stream)
+
+        asyncio.run(check())
+
+    def test_cold_health_and_login_leave_whisper_unloaded(self):
+        with patch("pipeline.subprocess.Popen") as child:
+            self.assertEqual(self.client.get("/api/health").status_code, 200)
+            self.assertEqual(self.client.get("/login").status_code, 200)
+            self.assertIsNone(self.application.state.whisper.process)
+            child.assert_not_called()
 
     def test_retention_and_restart(self):
         identifiers = [self.fixture_job("alice@example.test") for _ in range(12)]
