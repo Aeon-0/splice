@@ -27,10 +27,8 @@ class Settings:
 
     @property
     def cookie_name(self):
-        # Dev always uses unprefixed name so HTTPS quick tunnels keep sessions.
+        # Development cookies stay separate from production cookies.
         if not self.production:
-            return "splice_dev_session"
-        if not self.cookie_secure:
             return "splice_dev_session"
         return "__Secure-splice_session" if self.base_path else "__Host-splice_session"
 

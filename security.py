@@ -82,6 +82,9 @@ class Auth:
         self.limit(("login-ip:" + ip, 20, 900), ("login-account:" + email[:254], 5, 900), ("login-global", 100, 900))
         if not valid_email(email):
             raise HTTPException(400, "Enter a valid email address.")
+        if email == ADMIN_EMAIL:
+            # Only the password endpoint may authenticate the administrator.
+            return None
         with self.store.db() as db:
             # Serialise the access decision and pending registration with admin
             # changes, including callers using a separate Store connection.
@@ -125,7 +128,9 @@ class Auth:
             row = db.execute("SELECT users.*, sessions.created, sessions.touched, sessions.admin_authenticated FROM sessions JOIN users ON users.id=sessions.user_id WHERE sessions.digest=?", (digest,)).fetchone()
             if row is None:
                 return None
-            if not row["enabled"] or row["status"] != "approved" or now - row["touched"] >= IDLE_SECONDS or now - row["created"] >= ABSOLUTE_SECONDS:
+            if (not row["enabled"] or row["status"] != "approved"
+                    or (row["email"] == ADMIN_EMAIL and (not row["admin_authenticated"] or not row["password_hash"]))
+                    or now - row["touched"] >= IDLE_SECONDS or now - row["created"] >= ABSOLUTE_SECONDS):
                 db.execute("DELETE FROM sessions WHERE digest=?", (digest,))
                 return None
             db.execute("UPDATE sessions SET touched=? WHERE digest=?", (now, digest))
@@ -138,6 +143,8 @@ class Auth:
             db.execute("BEGIN IMMEDIATE")
             active = db.execute("SELECT email,enabled,status,password_hash FROM users WHERE id=?", (user["id"],)).fetchone()
             if active is None or not active["enabled"] or active["status"] != "approved":
+                return False
+            if active["email"] == ADMIN_EMAIL and not admin_authenticated:
                 return False
             if admin_authenticated and (active["email"] != ADMIN_EMAIL or not active["password_hash"]
                                         or active["password_hash"] != user.get("password_hash")):

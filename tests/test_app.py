@@ -340,7 +340,7 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(self.client.get(f"/media/{theirs}/original").status_code, 200)
 
     def test_password_and_signup_routes_are_removed(self):
-        self.login(ADMIN_EMAIL)
+        self.admin_login()
         for path in ("/password", "/static/password.js", "/static/signup.js"):
             self.assertEqual(self.client.get(path).status_code, 404)
         for path in ("/api/password", "/api/dev/set-password", "/api/signup"):

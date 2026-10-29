@@ -25,6 +25,7 @@ class AdminAuthTests(unittest.TestCase):
     tearDown = fixtures.SecurityTests.tearDown
     login = fixtures.SecurityTests.login
     admin_login = fixtures.SecurityTests.admin_login
+    fixture_job = fixtures.SecurityTests.fixture_job
 
     def attempt(self, email=ADMIN_EMAIL, password=PASSWORD, **kwargs):
         return self.client.post("/api/admin/login", headers=kwargs.pop("headers", CSRF),
@@ -35,6 +36,7 @@ class AdminAuthTests(unittest.TestCase):
             db.execute("DELETE FROM limits")
 
     def test_separate_page_password_success_whitespace_cookie_and_restart(self):
+        job_id = self.fixture_job(ADMIN_EMAIL)
         for base in ("", "/tools"):
             with self.subTest(base=base):
                 self.clear_limits()
@@ -57,10 +59,17 @@ class AdminAuthTests(unittest.TestCase):
                     self.assertIn('id="approve-form"', client.get(base + "/admin").text)
                     self.assertNotIn('type="password"', client.get(base + "/admin").text)
                     self.assertEqual(client.get(base + "/api/admin/users").status_code, 200)
+                    self.assertEqual(client.get(base + "/").status_code, 200)
+                    self.assertIn('id="admin-link"', client.get(base + "/").text)
+                    self.assertEqual(client.get(base + "/api/jobs").json()["jobs"][0]["jobId"], job_id)
+                    job = client.get(base + "/api/jobs/" + job_id).json()
+                    self.assertEqual(client.get(job["originalUrl"]).content, b"synthetic-original")
+                    self.assertEqual(client.get(job["cuts"][0]["videoUrl"]).content, b"synthetic-video")
                     saved = client.cookies
                 with TestClient(create_app(config), base_url=config.origin, cookies=saved) as client:
                     self.assertTrue(client.get(base + "/api/session").json()["admin"])
                     self.assertEqual(client.get(base + "/api/admin/users").status_code, 200)
+                    self.assertEqual(client.get(base + "/api/jobs").json()["jobs"][0]["jobId"], job_id)
 
     def test_generic_failure_for_bad_email_password_internal_spaces_and_types(self):
         attempts = [(ADMIN_EMAIL, PASSWORD.replace("  ", " ")), (ADMIN_EMAIL, "wrong"),
@@ -90,21 +99,78 @@ class AdminAuthTests(unittest.TestCase):
         self.auth.dummy_hash = fixtures.TEST_ADMIN_HASH
         self.assertEqual(self.attempt().status_code, 401)
 
-    def test_email_only_cannot_elevate_and_downgrades_an_admin_session(self):
-        self.assertEqual(self.admin_login().status_code, 200)
-        old = self.client.cookies.get(self.settings.cookie_name)
-        response = self.client.post("/api/login", headers=CSRF,
-                                    json={"email": ADMIN_EMAIL, "password": PASSWORD, "admin_authenticated": True, "admin": True})
-        self.assertEqual(response.status_code, 200)
-        self.assertIsNone(self.auth.current(old))
-        self.assertEqual(self.client.get("/api/session").json(), {"email": ADMIN_EMAIL, "admin": False})
-        self.assertEqual(self.client.get("/api/jobs").status_code, 200)
-        self.assertIn('id="admin-login-form"', self.client.get("/admin").text)
-        for method, body in (("GET", None), ("POST", {"action": "approve", "email": "unauthorised@example.test"})):
-            self.assertEqual(self.client.request(method, "/api/admin/users", headers=CSRF, json=body).status_code, 404)
+    def test_admin_email_only_never_creates_a_session_or_pending_application(self):
+        for base in ("", "/tools"):
+            self.clear_limits()
+            config = Settings(self.settings.data, "https://testserver", base, bytes(32), True)
+            with TestClient(create_app(config), base_url=config.origin) as client:
+                for email in (ADMIN_EMAIL, " \t" + ADMIN_EMAIL.upper() + "\n", "\u00a0" + ADMIN_EMAIL + "\u00a0"):
+                    response = client.post(base + "/api/login", headers=CSRF,
+                                           json={"email": email, "password": PASSWORD, "admin_authenticated": True, "admin": True})
+                    self.assertEqual(response.status_code, 202)
+                    self.assertEqual(response.json(), {"ok": True, "pending": True})
+                    self.assertNotIn("set-cookie", response.headers)
+                    self.assertFalse(client.cookies)
+                    for path in ("/api/session", "/api/jobs", "/api/admin/users"):
+                        self.assertEqual(client.get(base + path).status_code, 401)
+                    self.assertEqual(client.get(base + "/", follow_redirects=False).headers["location"], base + "/login")
+                    self.assertIn('id="admin-login-form"', client.get(base + "/admin").text)
+        with self.store.db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM audit").fetchone()[0], 0)
+            self.assertEqual(tuple(db.execute("SELECT enabled,status,password_hash FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()),
+                             (1, "approved", fixtures.TEST_ADMIN_HASH))
+
+    def test_admin_email_only_revokes_any_previous_browser_session(self):
+        for sign_in in (self.admin_login, self.login):
+            self.assertEqual(sign_in().status_code, 200)
+            old = self.client.cookies.get(self.settings.cookie_name)
+            response = self.login(ADMIN_EMAIL)
+            self.assertEqual(response.status_code, 202)
+            self.assertIn("Max-Age=0", response.headers["set-cookie"])
+            self.assertFalse(self.client.cookies)
+            self.assertIsNone(self.auth.current(old))
+            self.assertEqual(self.client.get("/api/session").status_code, 401)
+            self.assertEqual(self.client.get("/api/jobs").status_code, 401)
         self.assertEqual(self.login("alice@example.test").status_code, 200)
         self.assertFalse(self.client.get("/api/session").json()["admin"])
         self.assertNotIn("password", self.client.get("/login").text.lower())
+
+    def test_issue_and_current_reject_email_only_admin_sessions(self):
+        with self.store.db() as db:
+            user = dict(db.execute("SELECT * FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone())
+        response = JSONResponse({"ok": True})
+        self.assertFalse(self.auth.issue(user, None, response))
+        self.assertNotIn("set-cookie", response.headers)
+        # A stale session injected after startup is rejected on the next request.
+        token = "A" * 43
+        with self.store.db() as db:
+            db.execute("INSERT INTO sessions (digest,user_id,created,touched) VALUES (?,?,?,?)",
+                       (self.auth.digest(token), user["id"], time.time(), time.time()))
+        self.client.cookies.set(self.settings.cookie_name, token)
+        self.assertEqual(self.client.get("/api/jobs").status_code, 401)
+        with self.store.db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 0)
+
+    def test_startup_revokes_only_email_only_admin_sessions(self):
+        self.admin_login()
+        admin_cookie = self.client.cookies.get(self.settings.cookie_name)
+        self.client.cookies.clear()
+        self.login()
+        member_cookie = self.client.cookies.get(self.settings.cookie_name)
+        job_id = self.fixture_job(ADMIN_EMAIL)
+        with self.store.db() as db:
+            db.execute("INSERT INTO sessions (digest,user_id,created,touched) VALUES ('old-email-only',?,?,?)",
+                       (self.users[ADMIN_EMAIL], time.time(), time.time()))
+        for _ in range(2):
+            Store(self.settings.data)
+            with self.store.db() as db:
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM sessions").fetchone()[0], 2)
+                self.assertIsNone(db.execute("SELECT 1 FROM sessions WHERE digest='old-email-only'").fetchone())
+                self.assertEqual(db.execute("SELECT password_hash FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()[0], fixtures.TEST_ADMIN_HASH)
+                self.assertEqual(db.execute("SELECT owner_id FROM jobs WHERE id=?", (job_id,)).fetchone()[0], self.users[ADMIN_EMAIL])
+            self.assertTrue(self.auth.current(admin_cookie)["admin_authenticated"])
+            self.assertEqual(self.auth.current(member_cookie)["email"], "alice@example.test")
 
     def test_admin_account_ip_and_global_limits_persist(self):
         for _ in range(5):
@@ -178,7 +244,7 @@ class AdminAuthTests(unittest.TestCase):
 
 
 class EmailOnlyMigrationTests(unittest.TestCase):
-    def test_existing_email_only_sessions_and_jobs_survive_without_admin_rights(self):
+    def test_legacy_admin_email_only_sessions_are_revoked_and_jobs_survive(self):
         (ROOT / "data").mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=ROOT / "data") as directory:
             data = Path(directory)
@@ -187,13 +253,15 @@ class EmailOnlyMigrationTests(unittest.TestCase):
                 db.execute("CREATE TABLE sessions (digest TEXT PRIMARY KEY,user_id TEXT NOT NULL,created REAL NOT NULL,touched REAL NOT NULL)")
                 db.execute("INSERT INTO users (id,email) VALUES ('existing-admin',?)", (ADMIN_EMAIL,))
                 db.execute("INSERT INTO sessions VALUES ('existing-session','existing-admin',?,?)", (time.time(), time.time()))
+                db.execute("INSERT INTO users (id,email) VALUES ('existing-member','member@example.test')")
+                db.execute("INSERT INTO sessions VALUES ('member-session','existing-member',?,?)", (time.time(), time.time()))
                 db.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY,owner_id TEXT NOT NULL,created REAL NOT NULL,status TEXT NOT NULL,payload TEXT NOT NULL)")
                 db.execute("INSERT INTO jobs VALUES ('existing-job','existing-admin',0,'complete','{}')")
             for _ in range(2):
                 store = Store(data)
                 with store.db() as db:
-                    self.assertEqual(tuple(db.execute("SELECT id,password_hash FROM users").fetchone()), ("existing-admin", None))
-                    self.assertEqual(tuple(db.execute("SELECT digest,admin_authenticated FROM sessions").fetchone()), ("existing-session", 0))
+                    self.assertEqual(tuple(db.execute("SELECT id,password_hash FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()), ("existing-admin", None))
+                    self.assertEqual([tuple(row) for row in db.execute("SELECT digest,admin_authenticated FROM sessions")], [("member-session", 0)])
                     self.assertEqual(db.execute("SELECT owner_id FROM jobs").fetchone()[0], "existing-admin")
                     self.assertEqual({r["name"]: r["notnull"] for r in db.execute("PRAGMA table_info(users)")}["password_hash"], 0)
 

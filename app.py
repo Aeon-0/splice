@@ -106,7 +106,7 @@ def create_app(settings=None):
         response = JSONResponse({"ok": True})
         if user and auth.issue(user, old, response):
             return response
-        # Unknown, pending, declined and removed emails all receive this reply.
+        # The admin email also gets this neutral reply, with no session.
         response = JSONResponse({"ok": True, "pending": True}, status_code=202)
         if old:
             auth.logout(old, response)

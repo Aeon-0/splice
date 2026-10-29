@@ -24,16 +24,18 @@ class AuthRuntimeTests(unittest.TestCase):
                 for padding in ("\n", " \t\r\n", "\u00a0", " " * 140):
                     response = client.post("/api/login", headers=CSRF,
                                            json={"email": padding + ADMIN_EMAIL.upper() + padding})
-                    self.assertEqual(response.status_code, 200)
-                    self.assertEqual(client.get("/api/session").json(), {"email": ADMIN_EMAIL, "admin": False})
+                    self.assertEqual(response.status_code, 202)
+                    self.assertNotIn("set-cookie", response.headers)
+                    self.assertEqual(client.get("/api/session").status_code, 401)
                 with application.state.store.db() as db:
                     owner = db.execute("SELECT id FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()[0]
                     db.execute("UPDATE users SET enabled=0,status='removed' WHERE id=?", (owner,))
             # Startup always restores the immutable admin, preserving its owner ID.
             with TestClient(create_app(config), base_url=config.origin) as client:
-                self.assertEqual(client.post("/api/login", headers=CSRF, json={"email": ADMIN_EMAIL}).status_code, 200)
+                self.assertEqual(client.post("/api/login", headers=CSRF, json={"email": ADMIN_EMAIL}).status_code, 202)
                 with application.state.store.db() as db:
-                    self.assertEqual(db.execute("SELECT id FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()[0], owner)
+                    self.assertEqual(tuple(db.execute("SELECT id,enabled,status,password_hash FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()),
+                                     (owner, 1, "approved", None))
 
     def test_local_login_recent_restart_and_logout(self):
         (ROOT / "data").mkdir(exist_ok=True)
@@ -49,17 +51,18 @@ class AuthRuntimeTests(unittest.TestCase):
                         page = client.get(base + "/login")
                         self.assertNotIn("__BASE__", page.text)
                         self.assertIn(f'src="{base}/static/login.js"', page.text)
-                        response = client.post(base + "/api/login", headers=CSRF,
-                                               json={"email": ADMIN_EMAIL.upper()})
+                        store = app.state.store
+                        seed_admin_password(store)
+                        response = client.post(base + "/api/admin/login", headers=CSRF,
+                                               json={"email": ADMIN_EMAIL.upper(), "password": TEST_ADMIN_PASSWORD})
                         self.assertEqual(response.status_code, 200)
                         cookie = response.headers["set-cookie"]
                         self.assertIn("splice_dev_session=", cookie)
                         self.assertNotIn("Secure", cookie)
                         self.assertIn("HttpOnly", cookie)
                         self.assertIn("SameSite=lax", cookie)
-                        self.assertEqual(client.get(base + "/api/session").json(), {"email": ADMIN_EMAIL, "admin": False})
+                        self.assertEqual(client.get(base + "/api/session").json(), {"email": ADMIN_EMAIL, "admin": True})
                         self.assertNotIn("__BASE__", client.get(base + "/").text)
-                        store = app.state.store
                         with store.db() as db:
                             owner = db.execute("SELECT id FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()[0]
                         ids = []
@@ -69,9 +72,6 @@ class AuthRuntimeTests(unittest.TestCase):
                             ids.append(job_id)
                         expected = ids[-10:][::-1]
                         self.assertEqual([j["jobId"] for j in client.get(base + "/api/jobs").json()["jobs"]], expected)
-                        seed_admin_password(store)
-                        self.assertEqual(client.post(base + "/api/admin/login", headers=CSRF,
-                                                     json={"email": ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD}).status_code, 200)
                         self.assertEqual(client.post(base + "/api/admin/users", headers=CSRF,
                                                      json={"email": "viewer@example.test", "action": "approve"}).status_code, 200)
                         response = client.post(base + "/api/admin/users", headers=CSRF,

@@ -63,6 +63,10 @@ class Store:
             """)
             db.execute("BEGIN IMMEDIATE")
             migrate_auth_schema(db)
+            # Revoke legacy email-only admin sessions on every startup, while
+            # retaining password-authenticated sessions and all media owners.
+            db.execute("DELETE FROM sessions WHERE admin_authenticated=0 "
+                       "AND user_id IN (SELECT id FROM users WHERE email=?)", (ADMIN_EMAIL,))
 
     @contextmanager
     def db(self):

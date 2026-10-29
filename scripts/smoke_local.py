@@ -12,9 +12,9 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from fastapi.testclient import TestClient
 from app import create_app
-from config import Settings
+from config import ADMIN_EMAIL, Settings
 from pipeline import FFMPEG, FFPROBE
-from test_app import CSRF
+from test_app import CSRF, TEST_ADMIN_PASSWORD, seed_admin_password
 
 
 def command(argv):
@@ -81,13 +81,20 @@ def main():
         application = create_app(config)
         with TestClient(application, base_url=config.origin) as client:
             assert client.get("/api/jobs").status_code == 401
-            assert client.post("/api/login", headers=CSRF, json={"email": "lukesa100@gmail.com"}).status_code == 200
             store = application.state.store
+            assert client.post("/api/login", headers=CSRF, json={"email": ADMIN_EMAIL}).status_code == 202
+            assert client.get("/api/session").status_code == 401
+            seed_admin_password(store)  # Synthetic password in this temporary DB only.
+            assert client.post("/api/admin/login", headers=CSRF,
+                               json={"email": ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD}).status_code == 200
+            assert client.get("/").status_code == 200
+            assert client.get("/api/admin/users").status_code == 200
             with store.db() as db:
                 owner = db.execute("SELECT id FROM users").fetchone()[0]
             with sample.open("rb") as stream:
                 result = wait_for_job(client, client.post("/api/analyze-file", files={"file": ("$(id).mp4", stream, "video/mp4")}, headers=CSRF))
             verify(client, store, owner, result)
+            assert client.get("/api/jobs").json()["jobs"][0]["jobId"] == result["jobId"]
             assert result["originalFilename"] == "$(id).mp4"
             cut = result["cuts"][0]
             path = f"/api/jobs/{result['jobId']}/transcript/{cut['id']}"
