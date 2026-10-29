@@ -42,7 +42,7 @@ The smoke uses generated videos and synthetic identities in a temporary director
 
 ## Fly.io deployment
 
-**Live at `https://madebyluke.co/tools`**, on the existing Fly app `splice-tools`. The separate admin-login release reuses its single machine and private volume, and restores only `argon2-cffi==23.1.0` and its bindings. Regular user login remains email-only. Release checks and remaining audit limits are recorded in `docs/security-verification.md`.
+**Live at `https://madebyluke.co/tools`**, on the existing Fly app `splice-tools`. **The t1591u deployment is currently blocked by expired Fly trial billing; the hosted app has not received this change.** The prepared separate admin-login release reuses its single machine and private volume, and restores only `argon2-cffi==23.1.0` and its bindings. Regular user login remains email-only. Release checks and remaining audit limits are recorded in `docs/security-verification.md`.
 
 The original provisioning checklist below uses **`tools.madebyluke.co`** as an alternative hostname. The current configuration uses `/tools`, two CPUs and 4 GiB RAM. Use one machine and one Uvicorn worker: queue capacity and SQLite transactions are intentionally single-machine. Running multiple replicas requires a shared queue/database and distributed limits first. A 30 GiB volume is a starting capacity for a small allowlist; monitor free space and increase it before adding more accounts. Retention is per user, not a global disk quota.
 
