@@ -8,13 +8,13 @@ Uploads are **MP4, MOV or WebM only**, up to **200 MiB, 300 seconds, 1920 × 192
 
 Read [the security brief](docs/splice-security-brief.md) and [implementation/verification status](docs/security-verification.md) before DNS or creator access.
 
-- Sign in with an email only. Approved emails receive a session immediately; other valid emails are recorded as pending and see the same thank-you page asking them to message Luke on Discord or in coaching chat. There is no password or email-verification step. This is the intentional t1590u product choice and supersedes t1589u password signup.
-- Manage access lets the administrator approve an email directly, Accept or Decline pending applicants, and Remove existing access. An active admin session and the existing CSRF checks authorise decisions; there is no re-authentication. Removal immediately revokes sessions. A later attempt can register a new pending application but cannot restore access without approval. Decisions are audited. The immutable administrator is `lukesa100@gmail.com`, always approved on startup.
-- Existing SQLite users migrate without changing their IDs or access decisions; the obsolete password hash column is dropped. Recent videos remain attached to the same owner, including after removal and reapproval. Argon2 and the password setup/change routes are removed; old `/signup` links redirect to the email-only sign-in page.
+- Sign in with an email only. Approved emails receive a session immediately; other valid emails are recorded as pending and see the same thank-you page asking them to message Luke on Discord or in coaching chat. Regular users have no password or email-verification step. The separate `/tools/admin` page requires the administrator’s email and password (t1591u). Using the admin email at `/tools/login` grants ordinary app access only.
+- Manage access lets the administrator approve an email directly, Accept or Decline pending applicants, and Remove existing access. A password-authenticated admin session and the existing CSRF checks authorise decisions; there is no repeated password prompt for each decision. Removal immediately revokes sessions. A later attempt can register a new pending application but cannot restore access without approval. Decisions are audited. The immutable administrator is `lukesa100@gmail.com`, always approved on startup.
+- Existing SQLite users migrate without changing their IDs, access decisions or media ownership. A nullable `password_hash` is restricted to `lukesa100@gmail.com` by database triggers; Argon2id verifies admin passwords only. Existing sessions receive `admin_authenticated=0`. Legacy required password columns are replaced with empty nullable columns; old credentials never restore admin access. There are no public password-setting routes; old `/signup` links redirect to email-only sign-in. Until the offline setup below sets a hash, admin login always fails with `Invalid email or password`. Surrounding password whitespace is stripped; internal spaces remain significant.
 - All jobs, originals, cuts, transcript reads/writes, downloads, `HEAD` and byte-range requests check the logged-in owner. Cross-account objects return 404. Private responses use `Cache-Control: no-store`.
 - Session identifiers are random, HMAC-hashed in SQLite, rotated on login and revoked on logout. Production cookies are host-only, Secure, HttpOnly and SameSite=Lax; server expiry is 30 minutes idle / 10 hours absolute.
 - Mutations—including login—require `X-Requested-With: Splice`; supplied Origin must match the configured origin and cross-site Fetch Metadata is rejected. No cross-origin permissions are enabled. GET does not mutate user data.
-- Login limits: 5 attempts/account and 20/IP per 15 minutes, with a global cap. Upload/create: 5/hour/account, 10/hour/IP, one active job/account, two active jobs across the service and one processing worker. Limits survive restarts and return 429 with Retry-After.
+- Login limits: 5 attempts/account and 20/IP per 15 minutes, with a global cap of 100. Admin password login has separate persistent buckets with the same limits; an admin lockout does not block ordinary email-only login. Upload/create: 5/hour/account, 10/hour/IP, one active job/account, two active jobs across the service and one processing worker. Limits survive restarts and return 429 with Retry-After.
 - Files use generated user/job UUIDs outside the webroot. A bounded streaming parser rejects unsafe filenames and extra form fields. Magic bytes, a restricted ffprobe, codec/duration/resolution/frame-rate limits and common HTML/PHP/playlist signatures are checked before decoding.
 - All media commands use argv arrays, `shell=False`, fixed binary paths, no stdin and input protocol `file` only. Playlist demuxers are disabled. Outputs, threads, per-command and total job time are bounded. Decoders inherit a minimal environment without application secrets. Whisper runs in a reusable, killable child and is strictly offline.
 - Partial output/audio is removed on failure, timeout or restart; a ten-minute sweep removes orphan directories older than two hours. SQLite and uploads share the private volume. No media has a static-files mount.
@@ -30,6 +30,7 @@ node --test tests/test_ui.js
 node --check static/app.js
 node --check static/login.js
 node --check static/admin.js
+node --check static/admin-login.js
 ./scripts/smoke_local.sh
 sh -n start.sh stop.sh scripts/smoke_local.sh
 python3 scripts/audit_dependencies.py
@@ -37,11 +38,11 @@ python3 scripts/audit_dependencies.py
 
 The smoke uses generated videos and synthetic identities in a temporary directory under this project. It opens no listening socket, downloads no model and uses no real secrets. It verifies scene timings/colours, authenticated original/cut range requests, transcript writes, hard deletion and rejected playlists. The auth tests exercise email-only sign-in, pending applications, direct approval, revocation, legacy schema migration, loopback HTTP cookies, account isolation and restart persistence. `tests/test_scene_sample.py` probes the committed sample and verifies the missed 4.667-second Claude transition, nine clips and no tiny fragments, without network or Whisper.
 
-`start.sh` is a developer-only loopback listener at `127.0.0.1:8787`; `stop.sh` checks its process identity. Set `SESSION_SECRET` (64–128 hex characters), then run `./start.sh`. The admin is created automatically without a bootstrap credential. It sets `SPLICE_ENV=development` and defaults to `http://127.0.0.1:8787`; open that exact origin to sign in. Subsequent restarts need only the same session secret and existing database. An optional `SPLICE_ORIGIN` can select another loopback origin or an HTTPS proxy. Only explicit development on loopback HTTP uses a non-Secure `splice_dev_session` cookie; HTTPS and production retain the Secure prefixed cookies. `SPLICE_BASE_PATH=/tools` works locally too. Prefer the in-process smoke for routine verification. Never expose this listener to creators or point production DNS to a Mac, LAN IP, agent box or quick tunnel. Logs and runtime data stay ignored under `data/`.
+`start.sh` is a developer-only loopback listener at `127.0.0.1:8787`; `stop.sh` checks its process identity. Set `SESSION_SECRET` (64–128 hex characters), then run `./start.sh`. The admin account is created automatically, but admin sign-in remains locked until its password is set using the offline script below. It sets `SPLICE_ENV=development` and defaults to `http://127.0.0.1:8787`; open that exact origin to sign in. Subsequent restarts need only the same session secret and existing database. An optional `SPLICE_ORIGIN` can select another loopback origin or an HTTPS proxy. Only explicit development on loopback HTTP uses a non-Secure `splice_dev_session` cookie; HTTPS and production retain the Secure prefixed cookies. `SPLICE_BASE_PATH=/tools` works locally too. Prefer the in-process smoke for routine verification. Never expose this listener to creators or point production DNS to a Mac, LAN IP, agent box or quick tunnel. Logs and runtime data stay ignored under `data/`.
 
 ## Fly.io deployment
 
-**Live at `https://madebyluke.co/tools`**, on the existing Fly app `splice-tools`. The email-only release reuses its single machine and private volume, and removes the Argon2 dependency. Release checks and remaining audit limits are recorded in `docs/security-verification.md`.
+**Live at `https://madebyluke.co/tools`**, on the existing Fly app `splice-tools`. The separate admin-login release reuses its single machine and private volume, and restores only `argon2-cffi==23.1.0` and its bindings. Regular user login remains email-only. Release checks and remaining audit limits are recorded in `docs/security-verification.md`.
 
 The original provisioning checklist below uses **`tools.madebyluke.co`** as an alternative hostname. The current configuration uses `/tools`, two CPUs and 4 GiB RAM. Use one machine and one Uvicorn worker: queue capacity and SQLite transactions are intentionally single-machine. Running multiple replicas requires a shared queue/database and distributed limits first. A 30 GiB volume is a starting capacity for a small allowlist; monitor free space and increase it before adding more accounts. Retention is per user, not a global disk quota.
 
@@ -64,7 +65,25 @@ The intended production listener is a size-limiting reverse proxy on port 8080, 
 | `SPLICE_DATA_DIR` | Private mounted volume, `/data` | `fly.toml` |
 | `SPLICE_HSTS` | `0` during certificate validation; `1` once stable | `fly.toml` |
 
-For Fly, securely pipe secret-manager output containing the required `NAME=value` records into **`fly secrets import --stage`**, then deploy. `fly secrets set` is also supported by the platform, but avoid literal secret arguments in shell history. Generate the session key in a password manager or a trusted secrets workflow; do not print it in logs. Use `fly secrets list` to check names, never values. No admin bootstrap secret is required.
+For Fly, securely pipe secret-manager output containing the required `NAME=value` records into **`fly secrets import --stage`**, then deploy. `fly secrets set` is also supported by the platform, but avoid literal secret arguments in shell history. Generate the session key in a password manager or a trusted secrets workflow; do not print it in logs. Use `fly secrets list` to check names, never values. The admin password is set separately using the one-shot offline procedure below; it is not a persistent application environment variable.
+
+### Set the administrator password (Aeon only)
+
+No password is shipped or set by this release. Run these commands yourself from `/Users/aeon/projects/ugc-cuts` in an interactive terminal. Each prompts without echo; the password is never an argv value or shell-history literal. Use the same password at both prompts if local and Fly should agree. Do not enable shell tracing or pipe debugging logs. Surrounding whitespace is stripped, internal spaces are retained, and the limit is 1024 characters after trimming.
+
+Local (existing `data/splice.sqlite3`):
+
+```sh
+python3 -c 'import getpass, os, sys; os.environ["SPLICE_ADMIN_PASSWORD"] = getpass.getpass("Admin password: "); os.execv(sys.executable, [sys.executable, "scripts/set_admin_password.py", "data/splice.sqlite3"])'
+```
+
+Fly (existing `/data/splice.sqlite3`; SSH receives the password on stdin with no pseudo-terminal, then passes it to the setter through the environment):
+
+```sh
+python3 -c 'import getpass, sys; sys.stdout.write(getpass.getpass("Admin password: "))' | fly ssh console -a splice-tools --user splice --pty=false -C "python -c 'import os,sys; os.environ[\"SPLICE_ADMIN_PASSWORD\"]=sys.stdin.read(); os.execv(sys.executable,[sys.executable,\"/app/scripts/set_admin_password.py\",\"/data/splice.sqlite3\"])'"
+```
+
+The script accepts exactly one argument, the SQLite path, and reads the password only from `SPLICE_ADMIN_PASSWORD`. It refuses missing/blank values and non-existent databases, runs the auth migration transactionally, preserves the admin owner ID and revokes existing sessions for that account. It prints neither the password nor its hash. Ordinary users and their media are unchanged. No server restart is needed after setting or changing the password. Then sign in at `/tools/admin` (or `/admin` when the local base path is empty). See [Fly SSH console options](https://fly.io/docs/flyctl/ssh-console/) and [Argon2’s API](https://argon2-cffi.readthedocs.io/en/stable/api.html).
 
 Rotating `SESSION_SECRET` invalidates all session identifiers. Rotate it after a leak and revoke sessions; inspect exposure before restoring access. There is no database URL or third-party API key in this SQLite/local-inference deployment. Any future secret must go through the same platform vault. Railway's equivalent is a **sealed variable**, but no Railway deployment is configured by this PR.
 

@@ -7,6 +7,8 @@ import secrets
 import time
 import uuid
 
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError
 from fastapi import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, RedirectResponse
@@ -15,6 +17,7 @@ from config import ADMIN_EMAIL, MAX_BYTES
 
 IDLE_SECONDS = 1800
 ABSOLUTE_SECONDS = 36000
+MAX_PASSWORD_LENGTH = 1024
 HEADERS = {
     "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
     "x-content-type-options": "nosniff",
@@ -34,10 +37,21 @@ def valid_email(value):
     return len(value) <= 254 and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) is not None
 
 
+def normalise_password(value):
+    return value.strip() if isinstance(value, str) else ""
+
+
+def is_admin(user):
+    return bool(user and user["email"] == ADMIN_EMAIL and user.get("admin_authenticated") and user.get("password_hash"))
+
+
 class Auth:
     def __init__(self, store, settings):
         self.store = store
         self.settings = settings
+        self.hasher = PasswordHasher()
+        # Timing-only hash, never assigned to an account or accepted for login.
+        self.dummy_hash = self.hasher.hash(secrets.token_urlsafe(32))
 
     def digest(self, value):
         return hmac.new(self.settings.secret, value.encode(), hashlib.sha256).hexdigest()
@@ -84,13 +98,31 @@ class Auth:
                 self.audit(db, email, "apply", email)
         return None
 
+    def authenticate_admin(self, email, password, ip):
+        email = normalise_email(email)
+        password = normalise_password(password)
+        self.limit(("admin-login-ip:" + ip, 20, 900), ("admin-login-account:" + email[:254], 5, 900),
+                   ("admin-login-global", 100, 900))
+        with self.store.db() as db:
+            row = db.execute("SELECT * FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()
+        configured = bool(row and row["password_hash"])
+        valid = False
+        if password and len(password) <= MAX_PASSWORD_LENGTH:
+            try:
+                valid = self.hasher.verify(row["password_hash"] if configured else self.dummy_hash, password)
+            except (InvalidHashError, VerificationError):
+                pass
+        if not (valid and configured and email == ADMIN_EMAIL and row["enabled"] and row["status"] == "approved"):
+            raise HTTPException(401, "Invalid email or password")
+        return dict(row)
+
     def current(self, token):
         if not token or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
             return None
         digest = self.digest(token)
         now = time.time()
         with self.store.db() as db:
-            row = db.execute("SELECT users.*, sessions.created, sessions.touched FROM sessions JOIN users ON users.id=sessions.user_id WHERE sessions.digest=?", (digest,)).fetchone()
+            row = db.execute("SELECT users.*, sessions.created, sessions.touched, sessions.admin_authenticated FROM sessions JOIN users ON users.id=sessions.user_id WHERE sessions.digest=?", (digest,)).fetchone()
             if row is None:
                 return None
             if not row["enabled"] or row["status"] != "approved" or now - row["touched"] >= IDLE_SECONDS or now - row["created"] >= ABSOLUTE_SECONDS:
@@ -99,17 +131,22 @@ class Auth:
             db.execute("UPDATE sessions SET touched=? WHERE digest=?", (now, digest))
         return dict(row)
 
-    def issue(self, user, old, response):
+    def issue(self, user, old, response, *, admin_authenticated=False):
         token = secrets.token_urlsafe(32)
         now = time.time()
         with self.store.db() as db:
             db.execute("BEGIN IMMEDIATE")
-            active = db.execute("SELECT enabled,status FROM users WHERE id=?", (user["id"],)).fetchone()
+            active = db.execute("SELECT email,enabled,status,password_hash FROM users WHERE id=?", (user["id"],)).fetchone()
             if active is None or not active["enabled"] or active["status"] != "approved":
+                return False
+            if admin_authenticated and (active["email"] != ADMIN_EMAIL or not active["password_hash"]
+                                        or active["password_hash"] != user.get("password_hash")):
+                # A concurrent password reset must also defeat an in-flight login.
                 return False
             if old:
                 db.execute("DELETE FROM sessions WHERE digest=?", (self.digest(old),))
-            db.execute("INSERT INTO sessions VALUES (?,?,?,?)", (self.digest(token), user["id"], now, now))
+            db.execute("INSERT INTO sessions (digest,user_id,created,touched,admin_authenticated) VALUES (?,?,?,?,?)",
+                       (self.digest(token), user["id"], now, now, int(admin_authenticated)))
         response.set_cookie(self.settings.cookie_name, token, max_age=ABSOLUTE_SECONDS,
                             path=self.settings.cookie_path, secure=self.settings.cookie_secure, httponly=True, samesite="lax")
         return True
@@ -151,6 +188,7 @@ class SecurityMiddleware:
         path = scope["path"]
         relative = "/" if settings.base_path and path == settings.base_path else path[len(settings.base_path):] if path.startswith(settings.base_path + "/") else path
         public = relative in ("/api/health", "/login", "/api/login", "/signup", "/signup/thanks",
+                              "/admin", "/api/admin/login", "/static/admin-login.js",
                               "/static/styles.css", "/static/login.js", "/static/favicon.svg")
 
         started = False
@@ -182,8 +220,8 @@ class SecurityMiddleware:
                 if relative in ("/", "/admin"):
                     return await RedirectResponse(settings.url("/login"), status_code=303)(scope, receive, secured_send)
                 raise HTTPException(401, "Please sign in.")
-            if relative.startswith("/admin") or relative.startswith("/api/admin"):
-                if not user or user["email"] != ADMIN_EMAIL:
+            if relative.startswith("/api/admin") and relative != "/api/admin/login":
+                if not is_admin(user):
                     raise HTTPException(404, "Not found.")
             if request.method not in ("GET", "HEAD", "OPTIONS"):
                 if (request.headers.get("x-requested-with") != "Splice"

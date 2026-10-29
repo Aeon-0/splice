@@ -4,8 +4,8 @@ const base = document.body.dataset.basePath || "";
 let changing = false;
 async function api(method, body) {
   const response = await fetch(base + "/api/admin/users", {method, cache: "no-store", headers: {"Content-Type": "application/json", "X-Requested-With": "Splice"}, body: body ? JSON.stringify(body) : undefined});
-  if (response.status === 401) {
-    window.location.assign(base + "/login");
+  if (response.status === 401 || response.status === 404) {
+    window.location.assign(base + "/admin");
     throw new Error("Please sign in again.");
   }
   const result = await response.json();

@@ -416,7 +416,7 @@ test("Recent decodes first frames and cancels stale previews when opening a vide
   assert.equal(ui.$("clip-player").src, recent.originalUrl);
 });
 
-test("auth pages contain no password flow and share calm waiting copy", () => {
+test("regular sign-in and access management remain email-only", () => {
   for (const file of ["login.html", "login.js", "admin.html", "admin.js", "signup-thanks.html"]) {
     assert.doesNotMatch(fs.readFileSync("static/" + file, "utf8"), /password|initialPassword|reauth/i);
   }
@@ -424,6 +424,43 @@ test("auth pages contain no password flow and share calm waiting copy", () => {
   assert.match(thanks, /Thank you for creating an account/);
   assert.match(thanks, /Discord or in coaching chat/);
   assert.match(fs.readFileSync("static/login.html", "utf8"), /type="email"/);
+});
+
+test("separate admin sign-in trims only outer whitespace and handles failures", async () => {
+  assert.match(fs.readFileSync("static/admin-login.html", "utf8"), /type="password"/);
+  for (const base of ["", "/tools"]) {
+    for (const responseStatus of [200, 401, 429, 500]) {
+      const elements = new Map(["admin-login-form", "admin-email", "admin-password", "admin-sign-in", "admin-login-status"].map(id => [id, new Element()]));
+      elements.get("admin-email").value = " admin@example.test ";
+      elements.get("admin-password").value = " \nsynthetic  phrase\t ";
+      const redirects = [];
+      const context = vm.createContext({
+        document: {body: {dataset: {basePath: base}}, getElementById: id => elements.get(id)},
+        window: {location: {assign: url => redirects.push(url)}},
+        fetch: async (url, options) => {
+          assert.equal(elements.get("admin-sign-in").disabled, true);
+          assert.equal(url, base + "/api/admin/login");
+          assert.equal(options.method, "POST");
+          assert.equal(options.headers["X-Requested-With"], "Splice");
+          assert.deepEqual(JSON.parse(options.body), {email: "admin@example.test", password: "synthetic  phrase"});
+          return {ok: responseStatus === 200, status: responseStatus, headers: {get: () => "120"}};
+        },
+      });
+      vm.runInContext(fs.readFileSync("static/admin-login.js", "utf8"), context);
+      await elements.get("admin-login-form").listeners.get("submit")[0]({preventDefault() {}});
+      assert.equal(elements.get("admin-password").value, "");
+      assert.equal(elements.get("admin-sign-in").disabled, false);
+      if (responseStatus === 200) assert.deepEqual(redirects, [base + "/admin"]);
+      else {
+        assert.deepEqual(redirects, []);
+        assert.equal(elements.get("admin-login-status").hidden, false);
+        const message = elements.get("admin-login-status").textContent;
+        if (responseStatus === 401) assert.equal(message, "Invalid email or password");
+        else if (responseStatus === 429) assert.match(message, /Try again in 2 minutes/);
+        else assert.match(message, /could not be completed/);
+      }
+    }
+  }
 });
 
 test("admin can approve directly, accept or decline applicants and remove access", async () => {

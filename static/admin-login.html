@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en-GB">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><title>Admin sign in — Splice</title><link rel="stylesheet" href="__BASE__/static/styles.css"><script src="__BASE__/static/admin-login.js" defer></script></head>
+<body data-base-path="__BASE__">
+  <header class="top-bar"><a class="wordmark text-button" href="__BASE__/">Splice.</a><a class="text-button" href="__BASE__/login">User sign in</a></header>
+  <main class="auth-page">
+    <h1>Admin sign in</h1>
+    <form id="admin-login-form">
+      <label for="admin-email">Email</label>
+      <input id="admin-email" name="email" type="email" autocomplete="username" maxlength="254" required>
+      <label for="admin-password">Password</label>
+      <input id="admin-password" name="password" type="password" autocomplete="current-password" required>
+      <button id="admin-sign-in" class="primary-button" type="submit">Sign in</button>
+    </form>
+    <p id="admin-login-status" role="status" hidden></p>
+  </main>
+</body>
+</html>

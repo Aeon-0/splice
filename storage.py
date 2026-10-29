@@ -9,7 +9,30 @@ from contextlib import contextmanager
 
 from fastapi import HTTPException
 
-from config import MAX_BYTES, RETENTION
+from config import ADMIN_EMAIL, MAX_BYTES, RETENTION
+
+
+def migrate_auth_schema(db):
+    """Run inside a write transaction, also used by the offline admin setter."""
+    columns = {row["name"]: row for row in db.execute("PRAGMA table_info(users)")}
+    if "status" not in columns:
+        db.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'")
+        db.execute("UPDATE users SET status='removed' WHERE enabled=0")
+    if "password_hash" in columns and columns["password_hash"]["notnull"]:
+        # Pre-email-only credentials must not silently restore admin access.
+        db.execute("ALTER TABLE users DROP COLUMN password_hash")
+        del columns["password_hash"]
+    if "password_hash" not in columns:
+        db.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+    db.execute("UPDATE users SET password_hash=NULL WHERE email<>?", (ADMIN_EMAIL,))
+    # Enforce the invariant for inserts, hash changes AND email changes.
+    for operation in ("INSERT", "UPDATE"):
+        db.execute(f"""CREATE TRIGGER IF NOT EXISTS admin_password_only_{operation.lower()}
+            BEFORE {operation} ON users
+            WHEN NEW.password_hash IS NOT NULL AND NEW.email <> '{ADMIN_EMAIL}'
+            BEGIN SELECT RAISE(ABORT, 'Only the administrator can have a password'); END""")
+    if "admin_authenticated" not in {row["name"] for row in db.execute("PRAGMA table_info(sessions)")}:
+        db.execute("ALTER TABLE sessions ADD COLUMN admin_authenticated INTEGER NOT NULL DEFAULT 0 CHECK(admin_authenticated IN (0,1))")
 
 
 class Store:
@@ -38,13 +61,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS audit (
                     created REAL NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL);
             """)
-            if "status" not in {row["name"] for row in db.execute("PRAGMA table_info(users)")}:
-                db.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'")
-                db.execute("UPDATE users SET status='removed' WHERE enabled=0")
-            if "password_hash" in {row["name"] for row in db.execute("PRAGMA table_info(users)")}:
-                # Keep IDs and all access decisions so sessions and private jobs
-                # retain their owners. SQLite makes this schema change atomic.
-                db.execute("ALTER TABLE users DROP COLUMN password_hash")
+            db.execute("BEGIN IMMEDIATE")
+            migrate_auth_schema(db)
 
     @contextmanager
     def db(self):

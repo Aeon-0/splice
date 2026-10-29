@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from argon2 import PasswordHasher
 
 from app import create_app
 from config import ADMIN_EMAIL, ROOT, Settings
@@ -21,6 +22,14 @@ from transcript import slice_transcript
 from uploads import receive_upload, valid_filename
 
 CSRF = {"X-Requested-With": "Splice"}
+TEST_ADMIN_PASSWORD = "Synthetic admin  phrase"
+TEST_ADMIN_HASH = PasswordHasher().hash(TEST_ADMIN_PASSWORD)
+
+
+def seed_admin_password(store):
+    # Synthetic credentials are restricted to the temporary test database.
+    with store.db() as db:
+        db.execute("UPDATE users SET password_hash=? WHERE email=?", (TEST_ADMIN_HASH, ADMIN_EMAIL))
 
 
 class SecurityTests(unittest.TestCase):
@@ -40,6 +49,7 @@ class SecurityTests(unittest.TestCase):
                 db.execute("INSERT INTO users (id,email,enabled) VALUES (?,?,1)", (uid, email))
                 self.users[email] = uid
             self.users[ADMIN_EMAIL] = db.execute("SELECT id FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()[0]
+        seed_admin_password(self.store)
 
     def tearDown(self):
         self.client.__exit__(None, None, None)
@@ -47,6 +57,9 @@ class SecurityTests(unittest.TestCase):
 
     def login(self, email="alice@example.test"):
         return self.client.post("/api/login", json={"email": email}, headers=CSRF)
+
+    def admin_login(self):
+        return self.client.post("/api/admin/login", json={"email": ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD}, headers=CSRF)
 
     def fixture_job(self, owner="bob@example.test"):
         uid = self.users[owner]
@@ -135,7 +148,7 @@ class SecurityTests(unittest.TestCase):
         job_id = self.fixture_job()
         paths = (f"/api/jobs/{job_id}", f"/media/{job_id}/original", f"/media/{job_id}/clip-001.mp4", f"/api/jobs/{job_id}/transcript/{job_id}-1")
         for email in ("alice@example.test", ADMIN_EMAIL):
-            self.login(email)
+            self.admin_login() if email == ADMIN_EMAIL else self.login(email)
             self.assertEqual(self.client.get("/api/jobs").json(), {"jobs": []})
             for path in paths:
                 self.assertEqual(self.client.get(path).status_code, 404, path)
@@ -188,8 +201,8 @@ class SecurityTests(unittest.TestCase):
 
     def test_csrf_all_mutations_and_no_get_side_effects(self):
         self.assertEqual(self.client.post("/api/login", json={}).status_code, 403)
-        self.login(ADMIN_EMAIL)
-        for method, path in (("POST", "/api/login"), ("POST", "/api/analyze-file"), ("POST", "/api/logout"), ("POST", "/api/admin/users"),
+        self.admin_login()
+        for method, path in (("POST", "/api/login"), ("POST", "/api/admin/login"), ("POST", "/api/analyze-file"), ("POST", "/api/logout"), ("POST", "/api/admin/users"),
                              ("DELETE", "/api/jobs"), ("DELETE", "/api/jobs/x"), ("PUT", "/api/jobs/x/transcript/y")):
             self.assertEqual(self.client.request(method, path).status_code, 403, path)
             self.assertEqual(self.client.request(method, path, headers={**CSRF, "Origin": "https://evil.test"}).status_code, 403, path)
@@ -249,20 +262,20 @@ class SecurityTests(unittest.TestCase):
     def test_allowlist_admin_revocation_and_audit(self):
         self.login()
         token = self.client.cookies.get(self.settings.cookie_name)
-        self.assertEqual(self.client.get("/admin").status_code, 404)
+        self.assertIn('id="admin-login-form"', self.client.get("/admin").text)
         self.assertEqual(self.client.get("/api/admin/users").status_code, 404)
-        self.login(ADMIN_EMAIL)
+        self.admin_login()
         self.assertEqual(self.client.get("/admin").status_code, 200)
         payload = {"email": " ALICE@example.test ", "action": "remove"}
         self.assertEqual(self.client.post("/api/admin/users", json=payload, headers=CSRF).status_code, 200)
         self.assertIsNone(self.auth.current(token))
         self.assertEqual(self.login().status_code, 202)
-        self.assertEqual(self.login(ADMIN_EMAIL).status_code, 200)
+        self.assertEqual(self.admin_login().status_code, 200)
         payload.update(email=ADMIN_EMAIL)
         self.assertEqual(self.client.post("/api/admin/users", json=payload, headers=CSRF).status_code, 400)
         self.assertEqual(self.client.post("/api/login", headers=CSRF,
                                           json={"email": "new@example.test"}).status_code, 202)
-        self.assertEqual(self.login(ADMIN_EMAIL).status_code, 200)
+        self.assertEqual(self.admin_login().status_code, 200)
         payload.update(email="new@example.test", action="accept")
         self.assertEqual(self.client.post("/api/admin/users", json=payload, headers=CSRF).status_code, 200)
         self.assertEqual(self.login("NEW@example.test").status_code, 200)

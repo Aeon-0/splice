@@ -9,6 +9,8 @@
 !whisper_worker.py
 !static/
 !static/**
+!scripts/
+!scripts/set_admin_password.py
 !deploy/
 !deploy/**
 !requirements.txt

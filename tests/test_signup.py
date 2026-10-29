@@ -21,6 +21,7 @@ class AccessTests(unittest.TestCase):
     setUp = fixtures.SecurityTests.setUp
     tearDown = fixtures.SecurityTests.tearDown
     login = fixtures.SecurityTests.login
+    admin_login = fixtures.SecurityTests.admin_login
     fixture_job = fixtures.SecurityTests.fixture_job
 
     def change(self, action, email="new@example.test", **kwargs):
@@ -35,7 +36,7 @@ class AccessTests(unittest.TestCase):
         self.assertEqual(self.change("accept").status_code, 401)
         self.login("bob@example.test")
         self.assertEqual(self.change("accept").status_code, 404)
-        self.login(ADMIN_EMAIL)
+        self.admin_login()
         listing = self.client.get("/api/admin/users").json()["users"]
         self.assertIn({"email": "new@example.test", "enabled": 0, "status": "pending"}, listing)
         self.assertTrue(all(set(row) == {"email", "enabled", "status"} for row in listing))
@@ -70,7 +71,7 @@ class AccessTests(unittest.TestCase):
 
     def test_decline_remove_reapproval_and_immutable_admin(self):
         self.login("new@example.test")
-        self.login(ADMIN_EMAIL)
+        self.admin_login()
         self.assertEqual(self.change("decline").status_code, 200)
         self.assertEqual(self.change("accept").status_code, 409)
         for action in ("approve", "accept", "decline", "remove"):
@@ -83,7 +84,7 @@ class AccessTests(unittest.TestCase):
         self.login("alice@example.test")
         token = self.client.cookies.get(self.settings.cookie_name)
         with TestClient(create_app(self.settings), base_url=self.settings.origin) as admin:
-            admin.post("/api/login", headers=CSRF, json={"email": ADMIN_EMAIL})
+            admin.post("/api/admin/login", headers=CSRF, json={"email": ADMIN_EMAIL, "password": fixtures.TEST_ADMIN_PASSWORD})
             self.assertEqual(admin.post("/api/admin/users", headers=CSRF,
                                         json={"action": "remove", "email": "alice@example.test"}).status_code, 200)
             self.assertEqual(self.client.get(f"/media/{job_id}/original").status_code, 401)
@@ -152,7 +153,8 @@ class AccessMigrationTests(unittest.TestCase):
                     self.assertEqual(client.get("/tools/api/jobs").json()["jobs"][0]["jobId"], job_id)
                     self.assertEqual(client.post("/tools/api/login", headers=CSRF, json={"email": "removed@example.test"}).status_code, 202)
                 with store.db() as db:
-                    self.assertNotIn("password_hash", {row["name"] for row in db.execute("PRAGMA table_info(users)")})
+                    self.assertIn("password_hash", {row["name"] for row in db.execute("PRAGMA table_info(users)")})
+                    self.assertEqual(db.execute("SELECT COUNT(*) FROM users WHERE password_hash IS NOT NULL").fetchone()[0], 0)
                     self.assertEqual(db.execute("SELECT id FROM users WHERE email='approved@example.test'").fetchone()[0], owner)
                     if with_status:
                         self.assertEqual(db.execute("SELECT status FROM users WHERE email='declined@example.test'").fetchone()[0], "declined")
@@ -162,7 +164,8 @@ class AccessMigrationTests(unittest.TestCase):
             with self.subTest(base=base), tempfile.TemporaryDirectory(dir=ROOT / "data") as directory:
                 config = Settings(Path(directory), "https://testserver", base, bytes(32), True)
                 for restarted in (False, True):
-                    with TestClient(create_app(config), base_url=config.origin) as client:
+                    application = create_app(config)
+                    with TestClient(application, base_url=config.origin) as client:
                         for path in ("/login", "/signup/thanks", "/static/login.js"):
                             response = client.get(base + path)
                             self.assertEqual(response.status_code, 200)
@@ -172,7 +175,9 @@ class AccessMigrationTests(unittest.TestCase):
                         self.assertEqual(client.get(base + "/signup", follow_redirects=False).headers["location"], base + "/login")
                         self.assertEqual(client.post(base + "/api/login", headers=CSRF, json={"email": "applicant@example.test"}).status_code, 202)
                         if restarted:
-                            self.assertEqual(client.post(base + "/api/login", headers=CSRF, json={"email": ADMIN_EMAIL}).status_code, 200)
+                            fixtures.seed_admin_password(application.state.store)
+                            self.assertEqual(client.post(base + "/api/admin/login", headers=CSRF,
+                                                         json={"email": ADMIN_EMAIL, "password": fixtures.TEST_ADMIN_PASSWORD}).status_code, 200)
                             self.assertEqual(client.post(base + "/api/admin/users", headers=CSRF, json={"email": "applicant@example.test", "action": "accept"}).status_code, 200)
                             self.assertEqual(client.post(base + "/api/login", headers=CSRF, json={"email": "applicant@example.test"}).status_code, 200)
 

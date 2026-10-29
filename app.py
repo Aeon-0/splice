@@ -14,7 +14,7 @@ from starlette.concurrency import run_in_threadpool
 
 from config import ADMIN_EMAIL, ROOT, Settings
 from pipeline import WhisperWorker, process_job
-from security import Auth, SecurityMiddleware, normalise_email, valid_email
+from security import Auth, SecurityMiddleware, is_admin, normalise_email, valid_email
 from storage import Store
 from uploads import receive_upload
 
@@ -84,12 +84,12 @@ def create_app(settings=None):
         return page("signup-thanks.html")
 
     @application.get(base + "/admin")
-    def admin_page():
-        return page("admin.html")
+    def admin_page(request: Request):
+        return page("admin.html" if is_admin(request.state.user) else "admin-login.html")
 
     @application.get(base + "/static/{name}")
     def static(name: str):
-        if name not in {"styles.css", "app.js", "login.js", "admin.js", "favicon.svg"}:
+        if name not in {"styles.css", "app.js", "login.js", "admin.js", "admin-login.js", "favicon.svg"}:
             raise HTTPException(404, "Not found.")
         return FileResponse(ROOT / "static" / name)
 
@@ -115,7 +115,17 @@ def create_app(settings=None):
     @application.get(base + "/api/session")
     def session(request: Request):
         user = request.state.user
-        return {"email": user["email"], "admin": user["email"] == ADMIN_EMAIL}
+        return {"email": user["email"], "admin": is_admin(user)}
+
+    @application.post(base + "/api/admin/login")
+    async def admin_login(request: Request):
+        body = await body_json(request)
+        auth = application.state.auth
+        user = await run_in_threadpool(auth.authenticate_admin, body.get("email"), body.get("password"), request.state.ip)
+        response = JSONResponse({"ok": True})
+        if not auth.issue(user, request.cookies.get(application.state.settings.cookie_name), response, admin_authenticated=True):
+            raise HTTPException(401, "Invalid email or password")
+        return response
 
     @application.post(base + "/api/logout")
     def logout(request: Request):

@@ -16,6 +16,7 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY --chown=splice:splice app.py config.py storage.py security.py uploads.py pipeline.py transcript.py whisper_worker.py ./
 COPY --chown=splice:splice static ./static
+COPY --chown=splice:splice scripts/set_admin_password.py ./scripts/set_admin_password.py
 COPY deploy/nginx.conf /etc/nginx/nginx.conf
 COPY deploy/entrypoint.sh /entrypoint.sh
 RUN chmod 755 /entrypoint.sh && chown -R splice:splice /app/models /entrypoint.sh

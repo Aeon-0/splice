@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from app import create_app
 from config import ADMIN_EMAIL, ROOT, Settings
+from test_app import TEST_ADMIN_PASSWORD, seed_admin_password
 
 CSRF = {"X-Requested-With": "Splice"}
 
@@ -24,7 +25,7 @@ class AuthRuntimeTests(unittest.TestCase):
                     response = client.post("/api/login", headers=CSRF,
                                            json={"email": padding + ADMIN_EMAIL.upper() + padding})
                     self.assertEqual(response.status_code, 200)
-                    self.assertEqual(client.get("/api/session").json(), {"email": ADMIN_EMAIL, "admin": True})
+                    self.assertEqual(client.get("/api/session").json(), {"email": ADMIN_EMAIL, "admin": False})
                 with application.state.store.db() as db:
                     owner = db.execute("SELECT id FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()[0]
                     db.execute("UPDATE users SET enabled=0,status='removed' WHERE id=?", (owner,))
@@ -56,7 +57,7 @@ class AuthRuntimeTests(unittest.TestCase):
                         self.assertNotIn("Secure", cookie)
                         self.assertIn("HttpOnly", cookie)
                         self.assertIn("SameSite=lax", cookie)
-                        self.assertEqual(client.get(base + "/api/session").json(), {"email": ADMIN_EMAIL, "admin": True})
+                        self.assertEqual(client.get(base + "/api/session").json(), {"email": ADMIN_EMAIL, "admin": False})
                         self.assertNotIn("__BASE__", client.get(base + "/").text)
                         store = app.state.store
                         with store.db() as db:
@@ -68,6 +69,9 @@ class AuthRuntimeTests(unittest.TestCase):
                             ids.append(job_id)
                         expected = ids[-10:][::-1]
                         self.assertEqual([j["jobId"] for j in client.get(base + "/api/jobs").json()["jobs"]], expected)
+                        seed_admin_password(store)
+                        self.assertEqual(client.post(base + "/api/admin/login", headers=CSRF,
+                                                     json={"email": ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD}).status_code, 200)
                         self.assertEqual(client.post(base + "/api/admin/users", headers=CSRF,
                                                      json={"email": "viewer@example.test", "action": "approve"}).status_code, 200)
                         response = client.post(base + "/api/admin/users", headers=CSRF,
