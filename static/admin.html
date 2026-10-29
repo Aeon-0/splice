@@ -5,9 +5,11 @@
   <header class="top-bar"><a class="wordmark text-button" href="__BASE__/">Splice.</a><a class="text-button" href="__BASE__/">Back to videos</a></header>
   <main class="auth-page admin-page">
     <h1>Manage access</h1>
-    <label for="admin-password">Your administrator password</label>
-    <input id="admin-password" type="password" autocomplete="current-password" maxlength="128" aria-describedby="reauth-note" required>
-    <p id="reauth-note">Required for each access change.</p>
+    <form id="approve-form">
+      <label for="access-email">Approve an email</label>
+      <input id="access-email" type="email" autocomplete="off" maxlength="254" required>
+      <button id="approve-email" class="primary-button" type="submit">Approve</button>
+    </form>
     <p id="admin-status" role="status" hidden></p>
     <section class="access-section" aria-labelledby="applicants-title"><h2 id="applicants-title">Applicants</h2><div id="applicants"></div></section>
     <section class="access-section" aria-labelledby="users-title"><h2 id="users-title">People with access</h2><div id="users"></div></section>

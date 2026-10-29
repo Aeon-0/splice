@@ -5,8 +5,8 @@ let changing = false;
 async function api(method, body) {
   const response = await fetch(base + "/api/admin/users", {method, cache: "no-store", headers: {"Content-Type": "application/json", "X-Requested-With": "Splice"}, body: body ? JSON.stringify(body) : undefined});
   if (response.status === 401) {
-    if (method === "GET") window.location.assign(base + "/login");
-    throw new Error(method === "GET" ? "Please sign in again." : "Unable to confirm your password. Try again, or sign in again.");
+    window.location.assign(base + "/login");
+    throw new Error("Please sign in again.");
   }
   const result = await response.json();
   if (!response.ok) throw new Error(typeof result.detail === "string" ? result.detail : "The access change failed.");
@@ -42,19 +42,23 @@ async function refresh() {
 }
 async function change(action, email) {
   if (changing) return;
-  const password = $("admin-password").value;
-  if (!password.trim()) { status("Enter your administrator password to confirm this change."); $("admin-password").focus(); return; }
   changing = true;
   document.querySelectorAll(".access-actions button").forEach(button => { button.disabled = true; });
-  $("admin-password").value = "";
+  $("approve-email").disabled = true;
   try {
-    await api("POST", {action, email, password});
-    status({accept: "Access approved.", decline: "Application declined.", remove: "Access removed and sessions revoked."}[action]);
+    await api("POST", {action, email});
+    status({approve: "Access approved.", accept: "Access approved.", decline: "Application declined.", remove: "Access removed and sessions revoked."}[action]);
+    if (action === "approve") $("access-email").value = "";
     await refresh();
   } catch (error) { status(error.message); }
   finally {
     changing = false;
+    $("approve-email").disabled = false;
     document.querySelectorAll(".access-actions button").forEach(button => { button.disabled = false; });
   }
 }
+$("approve-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  await change("approve", $("access-email").value);
+});
 refresh().catch((error) => status(error.message));

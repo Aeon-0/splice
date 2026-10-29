@@ -15,7 +15,6 @@ from config import ADMIN_EMAIL, MAX_BYTES
 
 IDLE_SECONDS = 1800
 ABSOLUTE_SECONDS = 36000
-LOGIN_ERROR = "Invalid email or password"
 HEADERS = {
     "content-security-policy": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src 'self' blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'",
     "x-content-type-options": "nosniff",
@@ -31,61 +30,23 @@ def normalise_email(value):
     return value.strip().lower() if isinstance(value, str) else ""
 
 
-def normalise_password(value):
-    # Ignore clipboard padding while preserving spaces inside the password.
-    return value.strip() if isinstance(value, str) else ""
-
-
 def valid_email(value):
     return len(value) <= 254 and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) is not None
 
 
-def valid_password(value):
-    return (isinstance(value, str) and 15 <= len(value) <= 128
-            and value.lower() not in {"passwordpassword", "123456789012345", "1234567890123456", "qwertyuiopasdfgh"}
-            and len(set(value)) > 1)
-
-
 class Auth:
-    def __init__(self, store, settings, passwords):
+    def __init__(self, store, settings):
         self.store = store
         self.settings = settings
-        self.passwords = passwords
-        self.dummy_hash = passwords.hash(secrets.token_urlsafe(32))
 
     def digest(self, value):
         return hmac.new(self.settings.secret, value.encode(), hashlib.sha256).hexdigest()
 
-    def bootstrap(self, password):
-        password = normalise_password(password)
-        if not password:
-            with self.store.db() as db:
-                if not db.execute("SELECT 1 FROM users WHERE email=? AND enabled=1", (ADMIN_EMAIL,)).fetchone():
-                    raise RuntimeError("Seed the admin through the platform ADMIN_PASSWORD secret before first start.")
-            return
-        if not valid_password(password):
-            raise RuntimeError("ADMIN_PASSWORD must be 15–128 characters and not a common password.")
+    def bootstrap(self):
         with self.store.db() as db:
-            if not db.execute("SELECT 1 FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone():
-                db.execute("INSERT INTO users (id,email,password_hash,enabled) VALUES (?,?,?,1)", (str(uuid.uuid4()), ADMIN_EMAIL, self.passwords.hash(password)))
-
-    def signup(self, email, password, ip):
-        email = normalise_email(email)
-        password = normalise_password(password)
-        self.limit(("signup-ip:" + ip, 5, 3600), ("signup-account:" + email[:254], 3, 3600),
-                   ("signup-global", 50, 3600))
-        if not valid_email(email):
-            raise HTTPException(400, "Enter a valid email address.")
-        if not valid_password(password):
-            raise HTTPException(400, "Use a password of 15–128 characters; avoid common passwords.")
-        # Hash even duplicate submissions: the response must not reveal whether
-        # an email exists. Never replace an existing password or access decision.
-        hashed = self.passwords.hash(password)
-        with self.store.db() as db:
-            inserted = db.execute("INSERT INTO users (id,email,password_hash,enabled,status) VALUES (?,?,?,0,'pending') ON CONFLICT(email) DO NOTHING",
-                                  (str(uuid.uuid4()), email, hashed)).rowcount
-            if inserted:
-                self.audit(db, email, "apply", email)
+            db.execute("INSERT INTO users (id,email,enabled,status) VALUES (?,?,1,'approved') "
+                       "ON CONFLICT(email) DO UPDATE SET enabled=1,status='approved'",
+                       (str(uuid.uuid4()), ADMIN_EMAIL))
 
     def limit(self, *buckets):
         """Consume limits atomically; keys are HMACs, never raw email or IP."""
@@ -102,23 +63,26 @@ class Auth:
             for key, _, _ in buckets:
                 db.execute("INSERT INTO limits VALUES (?,?)", (self.digest(key), now))
 
-    def authenticate(self, email, password, ip):
+    def authenticate(self, email, ip):
         email = normalise_email(email)
-        password = normalise_password(password)
         self.limit(("login-ip:" + ip, 20, 900), ("login-account:" + email[:254], 5, 900), ("login-global", 100, 900))
+        if not valid_email(email):
+            raise HTTPException(400, "Enter a valid email address.")
         with self.store.db() as db:
+            # Serialise the access decision and pending registration with admin
+            # changes, including callers using a separate Store connection.
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-        sane = isinstance(password, str) and 15 <= len(password) <= 128
-        verified = self.passwords.verify(row["password_hash"] if row else self.dummy_hash, password if sane else "invalid-password-value")
-        if not row or not row["enabled"] or not sane or not verified:
-            raise HTTPException(401, LOGIN_ERROR)
-        return dict(row)
-
-    def reauthenticate(self, user, password, ip):
-        password = normalise_password(password)
-        self.limit(("reauth:" + user["id"], 5, 900), ("reauth-ip:" + ip, 20, 900))
-        if not self.passwords.verify(user["password_hash"], password if isinstance(password, str) and len(password) <= 128 else ""):
-            raise HTTPException(401, LOGIN_ERROR)
+            if row and row["enabled"] and row["status"] == "approved":
+                return dict(row)
+            if row is None:
+                db.execute("INSERT INTO users (id,email,enabled,status) VALUES (?,?,0,'pending')",
+                           (str(uuid.uuid4()), email))
+            else:
+                db.execute("UPDATE users SET enabled=0,status='pending' WHERE id=?", (row["id"],))
+            if row is None or row["status"] != "pending":
+                self.audit(db, email, "apply", email)
+        return None
 
     def current(self, token):
         if not token or not re.fullmatch(r"[A-Za-z0-9_-]{43}", token):
@@ -129,7 +93,7 @@ class Auth:
             row = db.execute("SELECT users.*, sessions.created, sessions.touched FROM sessions JOIN users ON users.id=sessions.user_id WHERE sessions.digest=?", (digest,)).fetchone()
             if row is None:
                 return None
-            if not row["enabled"] or now - row["touched"] >= IDLE_SECONDS or now - row["created"] >= ABSOLUTE_SECONDS:
+            if not row["enabled"] or row["status"] != "approved" or now - row["touched"] >= IDLE_SECONDS or now - row["created"] >= ABSOLUTE_SECONDS:
                 db.execute("DELETE FROM sessions WHERE digest=?", (digest,))
                 return None
             db.execute("UPDATE sessions SET touched=? WHERE digest=?", (now, digest))
@@ -139,14 +103,16 @@ class Auth:
         token = secrets.token_urlsafe(32)
         now = time.time()
         with self.store.db() as db:
-            active = db.execute("SELECT enabled FROM users WHERE id=?", (user["id"],)).fetchone()
-            if active is None or not active["enabled"]:
-                raise HTTPException(401, LOGIN_ERROR)
+            db.execute("BEGIN IMMEDIATE")
+            active = db.execute("SELECT enabled,status FROM users WHERE id=?", (user["id"],)).fetchone()
+            if active is None or not active["enabled"] or active["status"] != "approved":
+                return False
             if old:
                 db.execute("DELETE FROM sessions WHERE digest=?", (self.digest(old),))
             db.execute("INSERT INTO sessions VALUES (?,?,?,?)", (self.digest(token), user["id"], now, now))
         response.set_cookie(self.settings.cookie_name, token, max_age=ABSOLUTE_SECONDS,
                             path=self.settings.cookie_path, secure=self.settings.cookie_secure, httponly=True, samesite="lax")
+        return True
 
     def logout(self, token, response):
         if token:
@@ -184,7 +150,7 @@ class SecurityMiddleware:
         request = Request(scope)
         path = scope["path"]
         relative = "/" if settings.base_path and path == settings.base_path else path[len(settings.base_path):] if path.startswith(settings.base_path + "/") else path
-        public = relative in ("/api/health", "/login", "/api/login", "/signup", "/signup/thanks", "/api/signup", "/static/signup.js",
+        public = relative in ("/api/health", "/login", "/api/login", "/signup", "/signup/thanks",
                               "/static/styles.css", "/static/login.js", "/static/favicon.svg")
 
         started = False
@@ -244,6 +210,6 @@ class SecurityMiddleware:
             if not started:
                 await JSONResponse({"detail": error.detail}, status_code=error.status_code, headers=error.headers)(scope, receive, secured_send)
         except Exception:
-            # Never expose raw parser, filesystem, password-provider or decoder errors.
+            # Never expose raw parser, filesystem or decoder errors.
             if not started:
                 await JSONResponse({"detail": "The request could not be completed."}, status_code=500)(scope, receive, secured_send)

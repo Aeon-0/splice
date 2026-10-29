@@ -3,17 +3,18 @@ import asyncio
 import json
 import os
 import shutil
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from starlette.concurrency import run_in_threadpool
 
 from config import ADMIN_EMAIL, ROOT, Settings
 from pipeline import WhisperWorker, process_job
-from security import Auth, SecurityMiddleware, normalise_email, normalise_password, valid_email, valid_password
+from security import Auth, SecurityMiddleware, normalise_email, valid_email
 from storage import Store
 from uploads import receive_upload
 
@@ -28,20 +29,15 @@ async def body_json(request):
         raise HTTPException(400, "Invalid request.") from None
 
 
-def create_app(settings=None, passwords=None):
+def create_app(settings=None):
     @asynccontextmanager
     async def lifespan(application):
         os.umask(0o077)
         config = settings or Settings.from_env()
-        # Keep the password provider injectable for isolated security tests.
-        provider = passwords
-        if provider is None:
-            from passwords import Passwords
-            provider = Passwords()
         application.state.settings = config
         application.state.store = store = Store(config.data)
-        application.state.auth = auth = Auth(store, config, provider)
-        auth.bootstrap(os.environ.pop("ADMIN_PASSWORD", None))
+        application.state.auth = auth = Auth(store, config)
+        auth.bootstrap()
         store.recover()
         application.state.worker = worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="splice")
         application.state.whisper = whisper = WhisperWorker(config.data)
@@ -81,7 +77,7 @@ def create_app(settings=None, passwords=None):
 
     @application.get(base + "/signup")
     def signup_page():
-        return page("signup.html")
+        return RedirectResponse(base + "/login", status_code=303)
 
     @application.get(base + "/signup/thanks")
     def signup_thanks():
@@ -93,7 +89,7 @@ def create_app(settings=None, passwords=None):
 
     @application.get(base + "/static/{name}")
     def static(name: str):
-        if name not in {"styles.css", "app.js", "login.js", "signup.js", "admin.js", "favicon.svg"}:
+        if name not in {"styles.css", "app.js", "login.js", "admin.js", "favicon.svg"}:
             raise HTTPException(404, "Not found.")
         return FileResponse(ROOT / "static" / name)
 
@@ -101,20 +97,19 @@ def create_app(settings=None, passwords=None):
     def health():
         return {"status": "ok"}
 
-    @application.post(base + "/api/signup", status_code=202)
-    async def signup(request: Request):
-        body = await body_json(request)
-        await run_in_threadpool(application.state.auth.signup, body.get("email"), body.get("password"), request.state.ip)
-        return {"ok": True}
-
     @application.post(base + "/api/login")
     async def login(request: Request):
         body = await body_json(request)
         auth = application.state.auth
-        user = await run_in_threadpool(auth.authenticate, normalise_email(body.get("email")),
-                                      normalise_password(body.get("password")), request.state.ip)
+        user = await run_in_threadpool(auth.authenticate, body.get("email"), request.state.ip)
+        old = request.cookies.get(application.state.settings.cookie_name)
         response = JSONResponse({"ok": True})
-        auth.issue(user, request.cookies.get(application.state.settings.cookie_name), response)
+        if user and auth.issue(user, old, response):
+            return response
+        # Unknown, pending, declined and removed emails all receive this reply.
+        response = JSONResponse({"ok": True, "pending": True}, status_code=202)
+        if old:
+            auth.logout(old, response)
         return response
 
     @application.get(base + "/api/session")
@@ -126,24 +121,6 @@ def create_app(settings=None, passwords=None):
     def logout(request: Request):
         response = JSONResponse({"ok": True})
         application.state.auth.logout(request.cookies.get(application.state.settings.cookie_name), response)
-        return response
-
-    @application.post(base + "/api/password")
-    async def change_password(request: Request):
-        body = await body_json(request)
-        auth, store = application.state.auth, application.state.store
-        user = request.state.user
-        await run_in_threadpool(auth.reauthenticate, user, body.get("password"), request.state.ip)
-        password = normalise_password(body.get("newPassword"))
-        if not valid_password(password):
-            raise HTTPException(400, "Use a password of 15–128 characters; avoid common passwords.")
-        hashed = await run_in_threadpool(auth.passwords.hash, password)
-        with store.db() as db:
-            db.execute("UPDATE users SET password_hash=? WHERE id=?", (hashed, user["id"]))
-            db.execute("DELETE FROM sessions WHERE user_id=?", (user["id"],))
-            auth.audit(db, user["email"], "change-password", user["email"])
-        response = JSONResponse({"ok": True})
-        auth.issue(user, None, response)
         return response
 
     def present_job(payload):
@@ -170,10 +147,8 @@ def create_app(settings=None, passwords=None):
         return {"ok": True}
 
     @application.delete(base + "/api/jobs")
-    async def delete_all_jobs(request: Request):
-        body = await body_json(request)
+    def delete_all_jobs(request: Request):
         user = request.state.user
-        await run_in_threadpool(application.state.auth.reauthenticate, user, body.get("password"), request.state.ip)
         store = application.state.store
         with store.lock:
             jobs = store.recent(user["id"])
@@ -260,22 +235,31 @@ def create_app(settings=None, passwords=None):
         body = await body_json(request)
         store, auth = application.state.store, application.state.auth
         actor = request.state.user
-        await run_in_threadpool(auth.reauthenticate, actor, body.get("password"), request.state.ip)
         email = normalise_email(body.get("email"))
         action = body.get("action")
-        if not valid_email(email) or action not in ("accept", "decline", "remove"):
-            raise HTTPException(400, "Choose an applicant to accept or decline, or an account to remove.")
+        if not valid_email(email) or action not in ("approve", "accept", "decline", "remove"):
+            raise HTTPException(400, "Enter a valid email address and choose an access action.")
         if email == ADMIN_EMAIL:
             raise HTTPException(400, "The administrator's access cannot be changed here.")
         with store.db() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT id,enabled,status FROM users WHERE email=?", (email,)).fetchone()
-            if not row:
-                raise HTTPException(404, "Account not found.")
-            if (action in ("accept", "decline") and row["status"] != "pending") or (action == "remove" and not row["enabled"]):
-                raise HTTPException(409, "This account has changed. Refresh the page.")
-            status = {"accept": "approved", "decline": "declined", "remove": "removed"}[action]
-            db.execute("UPDATE users SET enabled=?,status=? WHERE id=?", (int(action == "accept"), status, row["id"]))
-            db.execute("DELETE FROM sessions WHERE user_id=?", (row["id"],))
+            if action == "approve":
+                # Add directly, or restore access without changing the media owner.
+                if row and row["enabled"] and row["status"] == "approved":
+                    return {"ok": True}
+                db.execute("INSERT INTO users (id,email,enabled,status) VALUES (?,?,1,'approved') "
+                           "ON CONFLICT(email) DO UPDATE SET enabled=1,status='approved'",
+                           (str(uuid.uuid4()), email))
+            else:
+                if not row:
+                    raise HTTPException(404, "Account not found.")
+                if (action in ("accept", "decline") and row["status"] != "pending") or (action == "remove" and not row["enabled"]):
+                    raise HTTPException(409, "This account has changed. Refresh the page.")
+                status = {"accept": "approved", "decline": "declined", "remove": "removed"}[action]
+                db.execute("UPDATE users SET enabled=?,status=? WHERE id=?", (int(action == "accept"), status, row["id"]))
+            if row:
+                db.execute("DELETE FROM sessions WHERE user_id=?", (row["id"],))
             auth.audit(db, actor["email"], action, email)
         return {"ok": True}
 

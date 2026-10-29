@@ -179,16 +179,15 @@ function job(status = "processing", stage = "Finding hard cuts with ffmpeg…") 
 
 const settle = () => new Promise(setImmediate);
 
-test("login distinguishes credentials, rate limits and generic failures", async () => {
+test("email-only login opens the app or waiting page and handles failures", async () => {
   const loginSource = fs.readFileSync("static/login.js", "utf8");
   const generic = "Unable to sign in. Try again.";
   for (const base of ["", "/tools"]) {
-    for (const [status, message] of [[200, null], [401, "Invalid email or password"],
+    for (const [status, message] of [[200, null], [202, null], [401, generic],
                                    [429, "Too many attempts. Try again later."],
-                                   [400, generic], [403, generic], [404, generic], [500, generic], [0, generic]]) {
-      const elements = new Map(["login-form", "sign-in", "login-error", "email", "password"].map(id => [id, new Element()]));
+                                   [400, "Enter a valid email address."], [403, generic], [404, generic], [500, generic], [0, generic]]) {
+      const elements = new Map(["login-form", "sign-in", "login-error", "email"].map(id => [id, new Element()]));
       elements.get("email").value = "test@example.test";
-      elements.get("password").value = "synthetic-test-password";
       let redirected;
       const context = vm.createContext({
         document: {body: {dataset: {basePath: base}}, getElementById: id => elements.get(id)},
@@ -197,7 +196,8 @@ test("login distinguishes credentials, rate limits and generic failures", async 
           assert.equal(url, base + "/api/login");
           assert.equal(options.headers["X-Requested-With"], "Splice");
           if (!status) throw new Error("Network failure");
-          return {ok: status === 200, status};
+          assert.deepEqual(JSON.parse(options.body), {email: "test@example.test"});
+          return {ok: status === 200 || status === 202, status};
         },
       });
       vm.runInContext(loginSource, context);
@@ -208,7 +208,7 @@ test("login distinguishes credentials, rate limits and generic failures", async 
         assert.equal(elements.get("login-error").textContent, message);
         assert.equal(redirected, undefined);
       } else {
-        assert.equal(redirected, base + "/");
+        assert.equal(redirected, base + (status === 202 ? "/signup/thanks" : "/"));
       }
     }
   }
@@ -416,42 +416,19 @@ test("Recent decodes first frames and cancels stale previews when opening a vide
   assert.equal(ui.$("clip-player").src, recent.originalUrl);
 });
 
-test("signup redirects to thanks and reports validation, throttling and failures", async () => {
-  const signupSource = fs.readFileSync("static/signup.js", "utf8");
-  for (const base of ["", "/tools"]) {
-    for (const status of [202, 400, 429, 500, 0]) {
-      const elements = new Map(["signup-form", "create-account", "signup-error", "email", "password"].map(id => [id, new Element()]));
-      elements.get("email").value = "test@example.test";
-      elements.get("password").value = "synthetic-test-password";
-      let redirected;
-      const context = vm.createContext({
-        document: {body: {dataset: {basePath: base}}, getElementById: id => elements.get(id)},
-        window: {location: {assign: url => { redirected = url; }}},
-        fetch: async (url, options) => {
-          assert.equal(url, base + "/api/signup");
-          assert.equal(options.headers["X-Requested-With"], "Splice");
-          assert.equal(JSON.parse(options.body).email, "test@example.test");
-          if (!status) throw new Error("Network failure");
-          return {ok: status === 202, status, json: async () => ({detail: "Enter a valid email address."})};
-        },
-      });
-      vm.runInContext(signupSource, context);
-      await elements.get("signup-form").listeners.get("submit")[0]({preventDefault() {}});
-      assert.equal(elements.get("create-account").disabled, false);
-      assert.equal(elements.get("password").value, "");
-      assert.equal(elements.get("signup-error").hidden, status === 202);
-      if (status === 202) assert.equal(redirected, base + "/signup/thanks");
-      else {
-        assert.equal(redirected, undefined);
-        assert.match(elements.get("signup-error").textContent, status === 429 ? /Too many/ : status === 400 ? /valid email/ : /Unable to create/);
-      }
-    }
+test("auth pages contain no password flow and share calm waiting copy", () => {
+  for (const file of ["login.html", "login.js", "admin.html", "admin.js", "signup-thanks.html"]) {
+    assert.doesNotMatch(fs.readFileSync("static/" + file, "utf8"), /password|initialPassword|reauth/i);
   }
+  const thanks = fs.readFileSync("static/signup-thanks.html", "utf8");
+  assert.match(thanks, /Thank you for creating an account/);
+  assert.match(thanks, /Discord or in coaching chat/);
+  assert.match(fs.readFileSync("static/login.html", "utf8"), /type="email"/);
 });
 
-test("admin lists applicants separately and requires reauth for Accept, Decline and Remove", async () => {
+test("admin can approve directly, accept or decline applicants and remove access", async () => {
   for (const base of ["", "/tools"]) {
-    const elements = new Map(["applicants", "users", "admin-password", "admin-status"].map(id => [id, new Element()]));
+    const elements = new Map(["applicants", "users", "approve-form", "access-email", "approve-email", "admin-status"].map(id => [id, new Element()]));
     const users = [{email: "lukesa100@gmail.com", enabled: 1, status: "approved"},
                    {email: "applicant@example.test", enabled: 0, status: "pending"},
                    {email: "member@example.test", enabled: 1, status: "approved"}];
@@ -474,19 +451,18 @@ test("admin lists applicants separately and requires reauth for Accept, Decline 
     for (const [id, index, action] of [["applicants", 0, "accept"], ["applicants", 1, "decline"], ["users", 0, "remove"]]) {
       const row = elements.get(id).children[id === "users" ? 1 : 0];
       const button = row.children[1].children[index];
-      const before = calls.length;
-      button.click();
-      await settle();
-      assert.equal(calls.length, before);
-      assert.equal(elements.get("admin-password").focused, true);
-      elements.get("admin-password").value = "synthetic-admin-password";
       button.click();
       await settle();
       const body = JSON.parse(calls.at(-2).options.body);
       assert.equal(body.action, action);
-      assert.equal(body.password, "synthetic-admin-password");
+      assert.deepEqual(Object.keys(body).sort(), ["action", "email"]);
       assert.equal(Object.hasOwn(body, "initialPassword"), false);
-      assert.equal(elements.get("admin-password").value, "");
+
     }
+    elements.get("access-email").value = " direct@example.test ";
+    await elements.get("approve-form").listeners.get("submit")[0]({preventDefault() {}});
+    assert.deepEqual(JSON.parse(calls.at(-2).options.body), {action: "approve", email: " direct@example.test "});
+    assert.equal(elements.get("access-email").value, "");
+    assert.equal(elements.get("approve-email").disabled, false);
   }
 });

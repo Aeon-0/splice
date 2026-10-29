@@ -1,5 +1,4 @@
 import asyncio
-import hashlib
 import json
 import os
 import subprocess
@@ -17,22 +16,11 @@ from fastapi.testclient import TestClient
 from app import create_app
 from config import ADMIN_EMAIL, ROOT, Settings
 import pipeline
-from security import ABSOLUTE_SECONDS, IDLE_SECONDS, LOGIN_ERROR
+from security import ABSOLUTE_SECONDS, IDLE_SECONDS
 from transcript import slice_transcript
 from uploads import receive_upload, valid_filename
 
-# Synthetic fixtures only; never real credentials or deployment secrets.
-PASSWORD = "synthetic-test-password-123"
 CSRF = {"X-Requested-With": "Splice"}
-
-
-class TestPasswords:
-    """A deliberately cheap test double; never wired into the running application."""
-    def hash(self, password):
-        return hashlib.sha256(password.encode()).hexdigest()
-
-    def verify(self, encoded, password):
-        return encoded == self.hash(password)
 
 
 class SecurityTests(unittest.TestCase):
@@ -40,17 +28,16 @@ class SecurityTests(unittest.TestCase):
         (ROOT / "data").mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=ROOT / "data")
         self.settings = Settings(Path(self.temp.name), "https://testserver", "", bytes(32), True, True)
-        self.application = create_app(self.settings, TestPasswords())
-        with patch.dict(os.environ, {"ADMIN_PASSWORD": PASSWORD}):
-            self.client = TestClient(self.application, base_url=self.settings.origin)
-            self.client.__enter__()
+        self.application = create_app(self.settings)
+        self.client = TestClient(self.application, base_url=self.settings.origin)
+        self.client.__enter__()
         self.store = self.application.state.store
         self.auth = self.application.state.auth
         self.users = {}
         with self.store.db() as db:
             for email in ("alice@example.test", "bob@example.test"):
                 uid = str(uuid.uuid4())
-                db.execute("INSERT INTO users (id,email,password_hash,enabled) VALUES (?,?,?,1)", (uid, email, TestPasswords().hash(PASSWORD)))
+                db.execute("INSERT INTO users (id,email,enabled) VALUES (?,?,1)", (uid, email))
                 self.users[email] = uid
             self.users[ADMIN_EMAIL] = db.execute("SELECT id FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()[0]
 
@@ -58,8 +45,8 @@ class SecurityTests(unittest.TestCase):
         self.client.__exit__(None, None, None)
         self.temp.cleanup()
 
-    def login(self, email="alice@example.test", password=PASSWORD):
-        return self.client.post("/api/login", json={"email": email, "password": password}, headers=CSRF)
+    def login(self, email="alice@example.test"):
+        return self.client.post("/api/login", json={"email": email}, headers=CSRF)
 
     def fixture_job(self, owner="bob@example.test"):
         uid = self.users[owner]
@@ -88,24 +75,25 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(self.client.get("/login", headers={"Host": "evil.test"}).status_code, 400)
 
     def test_generic_login_and_normalisation(self):
-        for email, password in (("unknown@example.test", PASSWORD), ("alice@example.test", "bad"), ("alice@example.test", "wrong-synthetic-password")):
-            response = self.login(email, password)
-            self.assertEqual(response.status_code, 401)
-            self.assertEqual(response.json()["detail"], LOGIN_ERROR)
+        for email in ("unknown@example.test", " UNKNOWN@example.test "):
+            response = self.login(email)
+            self.assertEqual(response.status_code, 202)
+            self.assertEqual(response.json(), {"ok": True, "pending": True})
+            self.assertNotIn("set-cookie", response.headers)
+            self.assertEqual(self.client.get("/api/session").status_code, 401)
         self.assertEqual(self.login(" ALICE@EXAMPLE.TEST ").status_code, 200)
 
-    def test_invalid_password_values_remain_unauthorised(self):
-        for password in (None, 123, [], {}, " \t\n", "x" * 129):
-            with self.subTest(password=password):
+    def test_invalid_email_values_do_not_create_accounts(self):
+        for email in (None, 123, [], {}, " \t\n", "invalid", "x" * 255 + "@example.test"):
+            with self.subTest(email=email):
                 with self.store.db() as db:
                     db.execute("DELETE FROM limits")
-                    user = dict(db.execute("SELECT * FROM users WHERE email=?", ("alice@example.test",)).fetchone())
-                response = self.login(password=password)
-                self.assertEqual(response.status_code, 401)
-                self.assertEqual(response.json()["detail"], LOGIN_ERROR)
-                with self.assertRaises(HTTPException) as error:
-                    self.auth.reauthenticate(user, password, "test")
-                self.assertEqual(error.exception.status_code, 401)
+                response = self.login(email)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["detail"], "Enter a valid email address.")
+                self.assertNotIn("set-cookie", response.headers)
+        with self.store.db() as db:
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM users").fetchone()[0], 3)
 
     def test_client_ip_only_trusts_the_loopback_proxy_header(self):
         from security import client_ip
@@ -182,8 +170,8 @@ class SecurityTests(unittest.TestCase):
             if old_url:
                 self.store.update(owner, job_id, originalUrl=old_url)
             config = Settings(self.settings.data, "https://testserver", base, bytes(32), False)
-            with TestClient(create_app(config, TestPasswords()), base_url=config.origin) as client:
-                client.post(base + "/api/login", headers=CSRF, json={"email": "alice@example.test", "password": PASSWORD})
+            with TestClient(create_app(config), base_url=config.origin) as client:
+                client.post(base + "/api/login", headers=CSRF, json={"email": "alice@example.test"})
                 result = client.get(base + "/api/jobs/" + job_id).json()
                 url = result["originalUrl"]
                 self.assertEqual(url, base + f"/media/{job_id}/original")
@@ -201,18 +189,18 @@ class SecurityTests(unittest.TestCase):
     def test_csrf_all_mutations_and_no_get_side_effects(self):
         self.assertEqual(self.client.post("/api/login", json={}).status_code, 403)
         self.login(ADMIN_EMAIL)
-        for method, path in (("POST", "/api/signup"), ("POST", "/api/analyze-file"), ("POST", "/api/logout"), ("POST", "/api/admin/users"), ("POST", "/api/password"),
+        for method, path in (("POST", "/api/login"), ("POST", "/api/analyze-file"), ("POST", "/api/logout"), ("POST", "/api/admin/users"),
                              ("DELETE", "/api/jobs"), ("DELETE", "/api/jobs/x"), ("PUT", "/api/jobs/x/transcript/y")):
             self.assertEqual(self.client.request(method, path).status_code, 403, path)
             self.assertEqual(self.client.request(method, path, headers={**CSRF, "Origin": "https://evil.test"}).status_code, 403, path)
         self.assertEqual(self.client.post("/api/logout", headers={**CSRF, "Sec-Fetch-Site": "cross-site"}).status_code, 403)
-        for path in ("/api/signup", "/api/login", "/api/logout", "/api/analyze-file"):
+        for path in ("/api/login", "/api/logout", "/api/analyze-file"):
             self.assertEqual(self.client.get(path).status_code, 405)
         self.assertEqual(self.client.get("/api/session").status_code, 200)
 
     def test_rate_limits_persist_and_return_retry_after(self):
         for _ in range(5):
-            self.assertEqual(self.login(password="wrong").status_code, 401)
+            self.assertEqual(self.login().status_code, 200)
         response = self.login()
         self.assertEqual(response.status_code, 429)
         self.assertGreater(int(response.headers["retry-after"]), 0)
@@ -223,7 +211,7 @@ class SecurityTests(unittest.TestCase):
         with self.store.db() as db:
             db.execute("DELETE FROM limits")
         for index in range(20):
-            self.login(f"missing{index}@example.test", "wrong")
+            self.login(f"missing{index}@example.test")
         self.assertEqual(self.login("another@example.test").status_code, 429)
 
     def test_upload_rate_queue_and_cleanup(self):
@@ -258,48 +246,65 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(restarted.job(self.users["bob@example.test"], job_id)["status"], "failed")
         self.assertFalse(restarted.directory(self.users["bob@example.test"], job_id).exists())
 
-    def test_allowlist_admin_reauth_revocation_and_audit(self):
+    def test_allowlist_admin_revocation_and_audit(self):
         self.login()
         token = self.client.cookies.get(self.settings.cookie_name)
         self.assertEqual(self.client.get("/admin").status_code, 404)
         self.assertEqual(self.client.get("/api/admin/users").status_code, 404)
         self.login(ADMIN_EMAIL)
         self.assertEqual(self.client.get("/admin").status_code, 200)
-        payload = {"email": " ALICE@example.test ", "action": "remove", "password": "wrong"}
-        self.assertEqual(self.client.post("/api/admin/users", json=payload, headers=CSRF).status_code, 401)
-        payload["password"] = PASSWORD
+        payload = {"email": " ALICE@example.test ", "action": "remove"}
         self.assertEqual(self.client.post("/api/admin/users", json=payload, headers=CSRF).status_code, 200)
         self.assertIsNone(self.auth.current(token))
-        self.assertEqual(self.login().status_code, 401)
+        self.assertEqual(self.login().status_code, 202)
         self.assertEqual(self.login(ADMIN_EMAIL).status_code, 200)
         payload.update(email=ADMIN_EMAIL)
         self.assertEqual(self.client.post("/api/admin/users", json=payload, headers=CSRF).status_code, 400)
-        self.assertEqual(self.client.post("/api/signup", headers=CSRF,
-                                          json={"email": "new@example.test", "password": PASSWORD}).status_code, 202)
+        self.assertEqual(self.client.post("/api/login", headers=CSRF,
+                                          json={"email": "new@example.test"}).status_code, 202)
+        self.assertEqual(self.login(ADMIN_EMAIL).status_code, 200)
         payload.update(email="new@example.test", action="accept")
         self.assertEqual(self.client.post("/api/admin/users", json=payload, headers=CSRF).status_code, 200)
         self.assertEqual(self.login("NEW@example.test").status_code, 200)
         with self.store.db() as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM audit").fetchone()[0], 3)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM audit").fetchone()[0], 4)
 
-    def test_password_change_reauth_and_revocation(self):
+    def test_delete_all_needs_only_owner_session_and_csrf(self):
+        mine = self.fixture_job("alice@example.test")
+        theirs = self.fixture_job("bob@example.test")
         self.login()
-        old = self.client.cookies.get(self.settings.cookie_name)
-        response = self.client.post("/api/password", json={"password": PASSWORD, "newPassword": "another-synthetic-password"}, headers=CSRF)
-        self.assertEqual(response.status_code, 200)
-        self.assertIsNone(self.auth.current(old))
-        self.assertEqual(self.login(password="another-synthetic-password").status_code, 200)
+        self.assertEqual(self.client.delete("/api/jobs").status_code, 403)
+        active = self.store.new_job(self.users["alice@example.test"])
+        self.assertEqual(self.client.delete("/api/jobs", headers=CSRF).status_code, 409)
+        self.assertEqual(self.client.get(f"/api/jobs/{mine}").status_code, 200)
+        self.store.update(self.users["alice@example.test"], active, status="failed")
+        self.assertEqual(self.client.delete("/api/jobs", headers=CSRF).status_code, 200)
+        self.assertEqual(self.client.get("/api/jobs").json(), {"jobs": []})
+        self.assertEqual(self.client.get(f"/media/{mine}/original").status_code, 404)
+        self.assertFalse(self.store.directory(self.users["alice@example.test"], mine).exists())
+        self.login("bob@example.test")
+        self.assertEqual(self.client.get(f"/media/{theirs}/original").status_code, 200)
+
+    def test_password_and_signup_routes_are_removed(self):
+        self.login(ADMIN_EMAIL)
+        for path in ("/password", "/static/password.js", "/static/signup.js"):
+            self.assertEqual(self.client.get(path).status_code, 404)
+        for path in ("/api/password", "/api/dev/set-password", "/api/signup"):
+            self.assertEqual(self.client.post(path, json={}, headers=CSRF).status_code, 404)
+        response = self.client.get("/signup", follow_redirects=False)
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers["location"], "/login")
 
     def test_body_size_legacy_routes_and_prefix(self):
         self.login()
-        response = self.client.post("/api/password", content=b"x" * 65537, headers=CSRF)
+        response = self.client.post("/api/login", content=b"x" * 65537, headers=CSRF)
         self.assertEqual(response.status_code, 413)
         self.assertEqual(self.client.post("/api/analyze", json={"url": "https://example.test/video"}, headers=CSRF).status_code, 404)
         self.assertEqual(self.client.get("/docs").status_code, 404)
         self.assertEqual(self.client.get("/openapi.json").status_code, 404)
         config = Settings(self.settings.data, "https://testserver", "/tools", bytes(32), True, True)
-        with TestClient(create_app(config, TestPasswords()), base_url=config.origin) as client:
-            response = client.post("/tools/api/login", json={"email": "alice@example.test", "password": PASSWORD}, headers=CSRF)
+        with TestClient(create_app(config), base_url=config.origin) as client:
+            response = client.post("/tools/api/login", json={"email": "alice@example.test"}, headers=CSRF)
             self.assertIn("__Secure-splice_session", response.headers["set-cookie"])
             self.assertIn("Path=/tools", response.headers["set-cookie"])
             self.assertNotIn("__Host-", response.headers["set-cookie"])

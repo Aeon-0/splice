@@ -3,7 +3,6 @@
 !config.py
 !storage.py
 !security.py
-!passwords.py
 !uploads.py
 !pipeline.py
 !transcript.py

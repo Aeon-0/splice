@@ -23,7 +23,7 @@ class Store:
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL,
-                    password_hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                    enabled INTEGER NOT NULL DEFAULT 1,
                     status TEXT NOT NULL DEFAULT 'approved');
                 CREATE TABLE IF NOT EXISTS sessions (
                     digest TEXT PRIMARY KEY, user_id TEXT NOT NULL,
@@ -41,6 +41,10 @@ class Store:
             if "status" not in {row["name"] for row in db.execute("PRAGMA table_info(users)")}:
                 db.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'")
                 db.execute("UPDATE users SET status='removed' WHERE enabled=0")
+            if "password_hash" in {row["name"] for row in db.execute("PRAGMA table_info(users)")}:
+                # Keep IDs and all access decisions so sessions and private jobs
+                # retain their owners. SQLite makes this schema change atomic.
+                db.execute("ALTER TABLE users DROP COLUMN password_hash")
 
     @contextmanager
     def db(self):

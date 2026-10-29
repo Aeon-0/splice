@@ -14,7 +14,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
   && python -c "from huggingface_hub import snapshot_download; snapshot_download(\"Systran/faster-whisper-base\", local_dir=\"/app/models/base\")"
 
-COPY --chown=splice:splice app.py config.py storage.py security.py passwords.py uploads.py pipeline.py transcript.py whisper_worker.py ./
+COPY --chown=splice:splice app.py config.py storage.py security.py uploads.py pipeline.py transcript.py whisper_worker.py ./
 COPY --chown=splice:splice static ./static
 COPY deploy/nginx.conf /etc/nginx/nginx.conf
 COPY deploy/entrypoint.sh /entrypoint.sh

@@ -1,12 +1,10 @@
 """Offline in-process smoke: synthetic media and synthetic test identities only."""
 import json
-import os
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -16,7 +14,7 @@ from fastapi.testclient import TestClient
 from app import create_app
 from config import Settings
 from pipeline import FFMPEG, FFPROBE
-from test_app import CSRF, PASSWORD, TestPasswords
+from test_app import CSRF
 
 
 def command(argv):
@@ -80,10 +78,10 @@ def main():
         argv.extend(["-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0,format=yuv420p[v]", "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "2", str(sample)])
         command(argv)
         config = Settings(directory / "private", "https://testserver", "", bytes(32), False)
-        application = create_app(config, TestPasswords())
-        with patch.dict(os.environ, {"ADMIN_PASSWORD": PASSWORD}), TestClient(application, base_url=config.origin) as client:
+        application = create_app(config)
+        with TestClient(application, base_url=config.origin) as client:
             assert client.get("/api/jobs").status_code == 401
-            assert client.post("/api/login", headers=CSRF, json={"email": "lukesa100@gmail.com", "password": PASSWORD}).status_code == 200
+            assert client.post("/api/login", headers=CSRF, json={"email": "lukesa100@gmail.com"}).status_code == 200
             store = application.state.store
             with store.db() as db:
                 owner = db.execute("SELECT id FROM users").fetchone()[0]

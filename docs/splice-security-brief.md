@@ -1,3 +1,5 @@
+> **29 October 2026, t1590u:** Email-only allowlist access supersedes this historical brief’s password, password re-authentication and closed-signup requirements. Non-approved attempts enter a pending list without a session. Luke approves or removes access using an active admin session. See [the implementation record](security-verification.md) for the current controls.
+
 # Splice — Security Go-Live Brief (Codex checklist)
 **Date:** 2026-10-28 (Europe/London)\
 **Product:** Splice — upload-only UGC pacing (mp4/mov/webm → ffmpeg scene cuts + Whisper transcript)\

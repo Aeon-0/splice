@@ -1,155 +1,181 @@
-"""Signup/approval boundaries, existing database migration and real Argon2."""
-import os
+"""Email applications, admin decisions and migration from both legacy schemas."""
 import sqlite3
 import tempfile
+import time
 import unittest
+import uuid
 from pathlib import Path
-from unittest.mock import patch
 
 from fastapi.testclient import TestClient
+from starlette.responses import JSONResponse
 
 from app import create_app
 from config import ADMIN_EMAIL, ROOT, Settings
-from security import LOGIN_ERROR
 from storage import Store
-import test_app
+import test_app as fixtures
 
-TestPasswords = test_app.TestPasswords
-PASSWORD, CSRF = test_app.PASSWORD, test_app.CSRF
+CSRF = fixtures.CSRF
 
 
-class SignupTests(unittest.TestCase):
-    setUp = test_app.SecurityTests.setUp
-    tearDown = test_app.SecurityTests.tearDown
-    login = test_app.SecurityTests.login
+class AccessTests(unittest.TestCase):
+    setUp = fixtures.SecurityTests.setUp
+    tearDown = fixtures.SecurityTests.tearDown
+    login = fixtures.SecurityTests.login
+    fixture_job = fixtures.SecurityTests.fixture_job
 
-    def signup(self, email="new@example.test", password=PASSWORD, **kwargs):
-        return self.client.post("/api/signup", json={"email": email, "password": password}, headers=kwargs.pop("headers", CSRF), **kwargs)
+    def change(self, action, email="new@example.test", **kwargs):
+        return self.client.post("/api/admin/users", headers=kwargs.pop("headers", CSRF),
+                                json={"action": action, "email": email}, **kwargs)
 
-    def change(self, action, email="new@example.test", password=PASSWORD):
-        return self.client.post("/api/admin/users", headers=CSRF, json={"action": action, "email": email, "password": password})
-
-    def test_pending_has_no_session_or_private_access(self):
-        response = self.signup(" NEW@EXAMPLE.TEST ")
-        self.assertEqual(response.status_code, 202)
-        self.assertNotIn("set-cookie", response.headers)
-        for path in ("/api/jobs", "/api/session", "/api/admin/users", "/media/missing/original"):
-            self.assertEqual(self.client.get(path).status_code, 401)
-        self.assertEqual(self.login("new@example.test").json(), {"detail": LOGIN_ERROR})
-        self.assertEqual(self.login("absent@example.test").json(), {"detail": LOGIN_ERROR})
-        self.login(ADMIN_EMAIL)
-        self.assertIn({"email": "new@example.test", "enabled": 0, "status": "pending"}, self.client.get("/api/admin/users").json()["users"])
-        self.assertEqual(self.change("accept", password="incorrect").status_code, 401)
+    def test_pending_accept_and_direct_approval(self):
+        self.assertEqual(self.login(" NEW@EXAMPLE.TEST ").status_code, 202)
         with self.store.db() as db:
-            self.assertEqual(db.execute("SELECT enabled FROM users WHERE email='new@example.test'").fetchone()[0], 0)
+            applicant = dict(db.execute("SELECT * FROM users WHERE email='new@example.test'").fetchone())
+        self.assertEqual((applicant["enabled"], applicant["status"]), (0, "pending"))
+        self.assertEqual(self.change("accept").status_code, 401)
+        self.login("bob@example.test")
+        self.assertEqual(self.change("accept").status_code, 404)
+        self.login(ADMIN_EMAIL)
+        listing = self.client.get("/api/admin/users").json()["users"]
+        self.assertIn({"email": "new@example.test", "enabled": 0, "status": "pending"}, listing)
+        self.assertTrue(all(set(row) == {"email", "enabled", "status"} for row in listing))
         self.assertEqual(self.change("accept").status_code, 200)
+        self.assertEqual(self.change("accept").status_code, 409)
+        self.assertEqual(self.change("approve", " DIRECT@EXAMPLE.TEST ").status_code, 200)
         self.assertEqual(self.login("new@example.test").status_code, 200)
-        self.assertEqual(self.client.get("/api/session").json(), {"email": "new@example.test", "admin": False})
-        self.assertEqual(self.change("accept", "bob@example.test").status_code, 404)
-
-    def test_duplicate_signup_never_replaces_password_access_or_sessions(self):
-        self.signup()
-        self.login()
-        token = self.client.cookies.get(self.settings.cookie_name)
+        self.assertEqual(self.login("direct@example.test").status_code, 200)
         with self.store.db() as db:
-            before = [tuple(row) for row in db.execute("SELECT * FROM users ORDER BY email")]
-        for email in ("new@example.test", "alice@example.test", ADMIN_EMAIL):
-            response = self.signup(email.upper(), "different-synthetic-password")
-            self.assertEqual((response.status_code, response.json()), (202, {"ok": True}))
+            self.assertEqual(db.execute("SELECT id FROM users WHERE email='new@example.test'").fetchone()[0], applicant["id"])
+            self.assertEqual([r[0] for r in db.execute("SELECT action FROM audit ORDER BY created")], ["apply", "accept", "approve"])
+
+    def test_all_unapproved_attempts_share_response_and_can_reapply(self):
+        responses = []
+        for state in (None, "pending", "declined", "removed"):
+            email = f"{state or 'unknown'}@example.test"
+            if state:
+                with self.store.db() as db:
+                    db.execute("INSERT INTO users (id,email,enabled,status) VALUES (?,?,0,?)", (str(uuid.uuid4()), email, state))
+            response = self.login(email)
+            responses.append((response.status_code, response.json()))
             self.assertNotIn("set-cookie", response.headers)
+            self.assertEqual(self.client.get("/api/session").status_code, 401)
+            with self.store.db() as db:
+                self.assertEqual(tuple(db.execute("SELECT enabled,status FROM users WHERE email=?", (email,)).fetchone()), (0, "pending"))
+        self.assertEqual(responses, [(202, {"ok": True, "pending": True})] * 4)
+        # Repeated applications create neither duplicate users nor duplicate audits.
+        self.login("unknown@example.test")
         with self.store.db() as db:
-            self.assertEqual(before, [tuple(row) for row in db.execute("SELECT * FROM users ORDER BY email")])
-        self.assertIsNotNone(self.auth.current(token))
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM users WHERE email='unknown@example.test'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM audit WHERE subject='unknown@example.test'").fetchone()[0], 1)
 
-    def test_decline_remove_and_immutable_admin(self):
-        self.signup()
+    def test_decline_remove_reapproval_and_immutable_admin(self):
+        self.login("new@example.test")
         self.login(ADMIN_EMAIL)
-        self.assertEqual(self.change("decline", password="incorrect").status_code, 401)
         self.assertEqual(self.change("decline").status_code, 200)
         self.assertEqual(self.change("accept").status_code, 409)
-        self.assertEqual(self.signup().status_code, 202)
-        self.assertNotIn("new@example.test", [u["email"] for u in self.client.get("/api/admin/users").json()["users"]])
-        self.assertEqual(self.login("new@example.test").status_code, 401)
-        with self.store.db() as db:
-            db.execute("DELETE FROM limits")
-        for action in ("accept", "decline", "remove"):
-            self.assertEqual(self.change(action, ADMIN_EMAIL).status_code, 400)
-        self.assertEqual(self.change("add", "other@example.test").status_code, 400)
+        for action in ("approve", "accept", "decline", "remove"):
+            self.assertEqual(self.change(action, " " + ADMIN_EMAIL.upper() + " ").status_code, 400)
         self.assertEqual(self.change("accept", "missing@example.test").status_code, 404)
-        with self.store.db() as db:
-            db.execute("DELETE FROM limits")
+        self.assertEqual(self.change("approve", "invalid").status_code, 400)
+        self.assertEqual(self.change("unknown").status_code, 400)
+        self.assertEqual(self.change("approve", headers={}).status_code, 403)
+        job_id = self.fixture_job("alice@example.test")
         self.login("alice@example.test")
         token = self.client.cookies.get(self.settings.cookie_name)
-        self.login(ADMIN_EMAIL)
-        self.assertEqual(self.change("remove", "alice@example.test").status_code, 200)
+        with TestClient(create_app(self.settings), base_url=self.settings.origin) as admin:
+            admin.post("/api/login", headers=CSRF, json={"email": ADMIN_EMAIL})
+            self.assertEqual(admin.post("/api/admin/users", headers=CSRF,
+                                        json={"action": "remove", "email": "alice@example.test"}).status_code, 200)
+            self.assertEqual(self.client.get(f"/media/{job_id}/original").status_code, 401)
+            self.assertEqual(self.login("alice@example.test").status_code, 202)
+            self.assertEqual(admin.post("/api/admin/users", headers=CSRF,
+                                        json={"action": "approve", "email": "alice@example.test"}).status_code, 200)
         self.assertIsNone(self.auth.current(token))
-        self.signup("alice@example.test")
-        self.assertEqual(self.login("alice@example.test").status_code, 401)
-        with self.store.db() as db:
-            self.assertEqual(db.execute("SELECT status FROM users WHERE email='alice@example.test'").fetchone()[0], "removed")
-            self.assertEqual([r[0] for r in db.execute("SELECT action FROM audit ORDER BY created")], ["apply", "decline", "remove"])
+        self.assertEqual(self.login("alice@example.test").status_code, 200)
+        self.assertEqual(self.client.get(f"/api/jobs/{job_id}").status_code, 200)
 
-    def test_signup_validation_csrf_and_persistent_limits(self):
-        for headers in ({}, {**CSRF, "Origin": "https://evil.test"}, {**CSRF, "Sec-Fetch-Site": "cross-site"}):
-            self.assertEqual(self.signup(headers=headers).status_code, 403)
-        for email, password in ((None, PASSWORD), ("invalid", PASSWORD), ("x" * 255 + "@example.test", PASSWORD),
-                                ("new@example.test", None), ("new@example.test", "short"),
-                                ("new@example.test", "passwordpassword"), ("new@example.test", "x" * 129)):
-            with self.store.db() as db:
-                db.execute("DELETE FROM limits")
-            self.assertEqual(self.signup(email, password).status_code, 400)
+    def test_pending_attempt_clears_previous_session(self):
+        self.login()
+        old = self.client.cookies.get(self.settings.cookie_name)
+        response = self.login("pending@example.test")
+        self.assertEqual(response.status_code, 202)
+        self.assertIn("Max-Age=0", response.headers["set-cookie"])
+        self.assertIsNone(self.auth.current(old))
+        self.assertEqual(self.client.get("/api/jobs").status_code, 401)
+
+    def test_removal_between_authentication_and_cookie_issue(self):
+        user = self.auth.authenticate("alice@example.test", "test")
+        with self.store.db() as db:
+            db.execute("UPDATE users SET enabled=0,status='removed' WHERE id=?", (user["id"],))
+        response = JSONResponse({"ok": True})
+        self.assertFalse(self.auth.issue(user, None, response))
+        self.assertNotIn("set-cookie", response.headers)
+
+    def test_login_limits_survive_restart(self):
+        for _ in range(5):
+            self.assertEqual(self.login("new@example.test").status_code, 202)
+        with TestClient(create_app(self.settings), base_url=self.settings.origin) as client:
+            response = client.post("/api/login", headers=CSRF, json={"email": " NEW@example.test "})
+            self.assertEqual(response.status_code, 429)
+            self.assertGreater(int(response.headers["retry-after"]), 0)
+        # The service-wide bucket also applies across IPs and addresses.
         with self.store.db() as db:
             db.execute("DELETE FROM limits")
-        for _ in range(3):
-            self.assertEqual(self.signup().status_code, 202)
-        with TestClient(create_app(self.settings, TestPasswords()), base_url=self.settings.origin) as restarted:
-            response = restarted.post("/api/signup", headers=CSRF, json={"email": "new@example.test", "password": PASSWORD})
-            self.assertEqual(response.status_code, 429)
-            self.assertTrue(response.headers.get("retry-after"))
-        self.assertEqual(self.signup("second@example.test").status_code, 202)
-        self.assertEqual(self.signup("third@example.test").status_code, 202)
-        self.assertEqual(self.signup("fourth@example.test").status_code, 429)
+            db.executemany("INSERT INTO limits VALUES (?,?)", [(self.auth.digest("login-global"), time.time())] * 100)
+        self.assertEqual(self.login("another@example.test").status_code, 429)
 
 
-class SignupRuntimeTests(unittest.TestCase):
-    def setUp(self):
+class AccessMigrationTests(unittest.TestCase):
+    def test_existing_database_preserves_owners_access_sessions_and_jobs(self):
         (ROOT / "data").mkdir(exist_ok=True)
+        for with_status in (False, True):
+            with self.subTest(with_status=with_status), tempfile.TemporaryDirectory(dir=ROOT / "data") as directory:
+                data = Path(directory)
+                owner = str(uuid.uuid4())
+                with sqlite3.connect(data / "splice.sqlite3") as db:
+                    db.execute("CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1" +
+                               (", status TEXT NOT NULL DEFAULT 'approved'" if with_status else "") + ")")
+                    for index, state in enumerate(("approved", "removed", "pending", "declined") if with_status else ("approved", "removed")):
+                        values = (owner if index == 0 else str(uuid.uuid4()), f"{state}@example.test", "synthetic-legacy-hash", int(state == "approved"))
+                        db.execute("INSERT INTO users VALUES (" + ",".join("?" for _ in range(5 if with_status else 4)) + ")",
+                                   values + (state,) if with_status else values)
+                store = Store(data)
+                job_id = store.new_job(owner)
+                store.update(owner, job_id, status="complete")
+                config = Settings(data, "https://testserver", "/tools", bytes(32), True)
+                with TestClient(create_app(config), base_url=config.origin) as client:
+                    self.assertEqual(client.post("/tools/api/login", headers=CSRF, json={"email": "approved@example.test"}).status_code, 200)
+                    saved = client.cookies
+                    self.assertEqual(client.get("/tools/api/jobs").json()["jobs"][0]["jobId"], job_id)
+                with TestClient(create_app(config), base_url=config.origin, cookies=saved) as client:
+                    self.assertEqual(client.get("/tools/api/session").json()["email"], "approved@example.test")
+                    self.assertEqual(client.get("/tools/api/jobs").json()["jobs"][0]["jobId"], job_id)
+                    self.assertEqual(client.post("/tools/api/login", headers=CSRF, json={"email": "removed@example.test"}).status_code, 202)
+                with store.db() as db:
+                    self.assertNotIn("password_hash", {row["name"] for row in db.execute("PRAGMA table_info(users)")})
+                    self.assertEqual(db.execute("SELECT id FROM users WHERE email='approved@example.test'").fetchone()[0], owner)
+                    if with_status:
+                        self.assertEqual(db.execute("SELECT status FROM users WHERE email='declined@example.test'").fetchone()[0], "declined")
 
-    def test_real_argon2_pending_restart_accept_and_prefixed_pages(self):
+    def test_public_pages_and_pending_approval_after_restart(self):
         for base in ("", "/tools"):
             with self.subTest(base=base), tempfile.TemporaryDirectory(dir=ROOT / "data") as directory:
                 config = Settings(Path(directory), "https://testserver", base, bytes(32), True)
-                application = create_app(config)
-                chosen = "synthetic applicant password"
-                with patch.dict(os.environ, {"ADMIN_PASSWORD": PASSWORD}), TestClient(application, base_url=config.origin) as client:
-                    for path in ("/signup", "/signup/thanks", "/static/signup.js"):
-                        page = client.get(base + path)
-                        self.assertEqual(page.status_code, 200)
-                        self.assertNotIn("__BASE__", page.text)
-                    self.assertIn(f'href="{base}/signup"', client.get(base + "/login").text)
-                    self.assertIn(f'href="{base}/login"', client.get(base + "/signup").text)
-                    self.assertIn("Discord or in coaching chat", client.get(base + "/signup/thanks").text)
-                    self.assertEqual(client.post(base + "/api/signup", headers=CSRF,
-                                                json={"email": " APPLICANT@example.test ", "password": " " + chosen + "\n"}).status_code, 202)
-                    with application.state.store.db() as db:
-                        row = db.execute("SELECT * FROM users WHERE email='applicant@example.test'").fetchone()
-                        self.assertTrue(row["password_hash"].startswith("$argon2id$"))
-                        self.assertTrue(application.state.auth.passwords.verify(row["password_hash"], chosen))
-                # Approval uses the stored applicant password after a full restart.
-                with TestClient(create_app(config), base_url=config.origin) as client:
-                    self.assertEqual(client.post(base + "/api/login", headers=CSRF, json={"email": "applicant@example.test", "password": chosen}).status_code, 401)
-                    self.assertEqual(client.post(base + "/api/login", headers=CSRF, json={"email": ADMIN_EMAIL, "password": PASSWORD}).status_code, 200)
-                    self.assertEqual(client.post(base + "/api/admin/users", headers=CSRF, json={"email": "applicant@example.test", "action": "accept", "password": PASSWORD}).status_code, 200)
-                    self.assertEqual(client.post(base + "/api/login", headers=CSRF, json={"email": "applicant@example.test", "password": chosen}).status_code, 200)
+                for restarted in (False, True):
+                    with TestClient(create_app(config), base_url=config.origin) as client:
+                        for path in ("/login", "/signup/thanks", "/static/login.js"):
+                            response = client.get(base + path)
+                            self.assertEqual(response.status_code, 200)
+                            self.assertNotIn("__BASE__", response.text)
+                            self.assertNotIn("password", response.text.lower())
+                        self.assertIn("Discord or in coaching chat", client.get(base + "/signup/thanks").text)
+                        self.assertEqual(client.get(base + "/signup", follow_redirects=False).headers["location"], base + "/login")
+                        self.assertEqual(client.post(base + "/api/login", headers=CSRF, json={"email": "applicant@example.test"}).status_code, 202)
+                        if restarted:
+                            self.assertEqual(client.post(base + "/api/login", headers=CSRF, json={"email": ADMIN_EMAIL}).status_code, 200)
+                            self.assertEqual(client.post(base + "/api/admin/users", headers=CSRF, json={"email": "applicant@example.test", "action": "accept"}).status_code, 200)
+                            self.assertEqual(client.post(base + "/api/login", headers=CSRF, json={"email": "applicant@example.test"}).status_code, 200)
 
-    def test_existing_database_migration_preserves_access_and_passwords(self):
-        with tempfile.TemporaryDirectory(dir=ROOT / "data") as directory:
-            with sqlite3.connect(Path(directory) / "splice.sqlite3") as db:
-                db.execute("CREATE TABLE users (id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL, password_hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1)")
-                for index, enabled in enumerate((1, 0)):
-                    db.execute("INSERT INTO users VALUES (?,?,?,?)", (str(index), f"{index}@example.test", "synthetic-hash", enabled))
-            for _ in range(2):
-                store = Store(Path(directory))
-                with store.db() as db:
-                    rows = db.execute("SELECT password_hash,enabled,status FROM users ORDER BY id").fetchall()
-                    self.assertEqual([tuple(r) for r in rows], [("synthetic-hash", 1, "approved"), ("synthetic-hash", 0, "removed")])
+
+if __name__ == "__main__":
+    unittest.main()
