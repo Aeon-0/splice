@@ -31,6 +31,11 @@ def normalise_email(value):
     return value.strip().lower() if isinstance(value, str) else ""
 
 
+def normalise_password(value):
+    # Ignore clipboard padding while preserving spaces inside the password.
+    return value.strip() if isinstance(value, str) else ""
+
+
 def valid_email(value):
     return len(value) <= 254 and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) is not None
 
@@ -52,6 +57,7 @@ class Auth:
         return hmac.new(self.settings.secret, value.encode(), hashlib.sha256).hexdigest()
 
     def bootstrap(self, password):
+        password = normalise_password(password)
         if not password:
             with self.store.db() as db:
                 if not db.execute("SELECT 1 FROM users WHERE email=? AND enabled=1", (ADMIN_EMAIL,)).fetchone():
@@ -80,6 +86,7 @@ class Auth:
 
     def authenticate(self, email, password, ip):
         email = normalise_email(email)
+        password = normalise_password(password)
         self.limit(("login-ip:" + ip, 20, 900), ("login-account:" + email[:254], 5, 900), ("login-global", 100, 900))
         with self.store.db() as db:
             row = db.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
@@ -90,6 +97,7 @@ class Auth:
         return dict(row)
 
     def reauthenticate(self, user, password, ip):
+        password = normalise_password(password)
         self.limit(("reauth:" + user["id"], 5, 900), ("reauth-ip:" + ip, 20, 900))
         if not self.passwords.verify(user["password_hash"], password if isinstance(password, str) and len(password) <= 128 else ""):
             raise HTTPException(401, LOGIN_ERROR)

@@ -39,7 +39,7 @@ class SecurityTests(unittest.TestCase):
     def setUp(self):
         (ROOT / "data").mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=ROOT / "data")
-        self.settings = Settings(Path(self.temp.name), "https://testserver", "", bytes(32), False, True)
+        self.settings = Settings(Path(self.temp.name), "https://testserver", "", bytes(32), True, True)
         self.application = create_app(self.settings, TestPasswords())
         with patch.dict(os.environ, {"ADMIN_PASSWORD": PASSWORD}):
             self.client = TestClient(self.application, base_url=self.settings.origin)
@@ -93,6 +93,31 @@ class SecurityTests(unittest.TestCase):
             self.assertEqual(response.status_code, 401)
             self.assertEqual(response.json()["detail"], LOGIN_ERROR)
         self.assertEqual(self.login(" ALICE@EXAMPLE.TEST ").status_code, 200)
+
+    def test_invalid_password_values_remain_unauthorised(self):
+        for password in (None, 123, [], {}, " \t\n", "x" * 129):
+            with self.subTest(password=password):
+                with self.store.db() as db:
+                    db.execute("DELETE FROM limits")
+                    user = dict(db.execute("SELECT * FROM users WHERE email=?", ("alice@example.test",)).fetchone())
+                response = self.login(password=password)
+                self.assertEqual(response.status_code, 401)
+                self.assertEqual(response.json()["detail"], LOGIN_ERROR)
+                with self.assertRaises(HTTPException) as error:
+                    self.auth.reauthenticate(user, password, "test")
+                self.assertEqual(error.exception.status_code, 401)
+
+    def test_client_ip_only_trusts_the_loopback_proxy_header(self):
+        from security import client_ip
+        from starlette.requests import Request
+        for peer, header, expected in (("127.0.0.1", "198.51.100.7", "198.51.100.7"),
+                                       ("::1", "2001:db8::7", "2001:db8::7"),
+                                       ("127.0.0.1", "invalid", "platform-unknown"),
+                                       ("198.51.100.8", "198.51.100.7", "198.51.100.8")):
+            with self.subTest(peer=peer, header=header):
+                request = Request({"type": "http", "client": (peer, 1234),
+                                   "headers": [(b"x-splice-client-ip", header.encode()), (b"x-forwarded-for", b"203.0.113.9")]})
+                self.assertEqual(client_ip(request, self.settings), expected)
 
     def test_secure_cookie_rotation_logout_and_hashed_storage(self):
         response = self.login()
@@ -270,7 +295,7 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(self.client.post("/api/analyze", json={"url": "https://example.test/video"}, headers=CSRF).status_code, 404)
         self.assertEqual(self.client.get("/docs").status_code, 404)
         self.assertEqual(self.client.get("/openapi.json").status_code, 404)
-        config = Settings(self.settings.data, "https://testserver", "/tools", bytes(32), False, True)
+        config = Settings(self.settings.data, "https://testserver", "/tools", bytes(32), True, True)
         with TestClient(create_app(config, TestPasswords()), base_url=config.origin) as client:
             response = client.post("/tools/api/login", json={"email": "alice@example.test", "password": PASSWORD}, headers=CSRF)
             self.assertIn("__Secure-splice_session", response.headers["set-cookie"])

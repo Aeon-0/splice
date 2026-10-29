@@ -13,7 +13,7 @@ from starlette.concurrency import run_in_threadpool
 
 from config import ADMIN_EMAIL, ROOT, Settings
 from pipeline import WhisperWorker, process_job
-from security import Auth, SecurityMiddleware, normalise_email, valid_email, valid_password
+from security import Auth, SecurityMiddleware, normalise_email, normalise_password, valid_email, valid_password
 from storage import Store
 from uploads import receive_upload
 
@@ -97,7 +97,8 @@ def create_app(settings=None, passwords=None):
     async def login(request: Request):
         body = await body_json(request)
         auth = application.state.auth
-        user = await run_in_threadpool(auth.authenticate, body.get("email"), body.get("password"), request.state.ip)
+        user = await run_in_threadpool(auth.authenticate, normalise_email(body.get("email")),
+                                      normalise_password(body.get("password")), request.state.ip)
         response = JSONResponse({"ok": True})
         auth.issue(user, request.cookies.get(application.state.settings.cookie_name), response)
         return response
@@ -119,7 +120,7 @@ def create_app(settings=None, passwords=None):
         auth, store = application.state.auth, application.state.store
         user = request.state.user
         await run_in_threadpool(auth.reauthenticate, user, body.get("password"), request.state.ip)
-        password = body.get("newPassword")
+        password = normalise_password(body.get("newPassword"))
         if not valid_password(password):
             raise HTTPException(400, "Use a password of 15–128 characters; avoid common passwords.")
         hashed = await run_in_threadpool(auth.passwords.hash, password)
@@ -254,9 +255,10 @@ def create_app(settings=None, passwords=None):
             raise HTTPException(400, "The administrator's access cannot be changed here.")
         hashed = None
         if action == "add":
-            if not valid_password(body.get("initialPassword")):
+            password = normalise_password(body.get("initialPassword"))
+            if not valid_password(password):
                 raise HTTPException(400, "Use an initial password of 15–128 characters; avoid common passwords.")
-            hashed = await run_in_threadpool(auth.passwords.hash, body["initialPassword"])
+            hashed = await run_in_threadpool(auth.passwords.hash, password)
         with store.db() as db:
             if action == "add":
                 import uuid

@@ -170,6 +170,41 @@ function job(status = "processing", stage = "Finding hard cuts with ffmpeg…") 
 
 const settle = () => new Promise(setImmediate);
 
+test("login distinguishes credentials, rate limits and generic failures", async () => {
+  const loginSource = fs.readFileSync("static/login.js", "utf8");
+  const generic = "Unable to sign in. Try again.";
+  for (const base of ["", "/tools"]) {
+    for (const [status, message] of [[200, null], [401, "Invalid email or password"],
+                                   [429, "Too many attempts. Try again later."],
+                                   [400, generic], [403, generic], [404, generic], [500, generic], [0, generic]]) {
+      const elements = new Map(["login-form", "sign-in", "login-error", "email", "password"].map(id => [id, new Element()]));
+      elements.get("email").value = "test@example.test";
+      elements.get("password").value = "synthetic-test-password";
+      let redirected;
+      const context = vm.createContext({
+        document: {body: {dataset: {basePath: base}}, getElementById: id => elements.get(id)},
+        window: {location: {assign: url => { redirected = url; }}},
+        fetch: async (url, options) => {
+          assert.equal(url, base + "/api/login");
+          assert.equal(options.headers["X-Requested-With"], "Splice");
+          if (!status) throw new Error("Network failure");
+          return {ok: status === 200, status};
+        },
+      });
+      vm.runInContext(loginSource, context);
+      await elements.get("login-form").listeners.get("submit")[0]({preventDefault() {}});
+      assert.equal(elements.get("sign-in").disabled, false);
+      assert.equal(elements.get("login-error").hidden, message === null);
+      if (message) {
+        assert.equal(elements.get("login-error").textContent, message);
+        assert.equal(redirected, undefined);
+      } else {
+        assert.equal(redirected, base + "/");
+      }
+    }
+  }
+});
+
 test("light blue UI, local assets and restricted formats", () => {
   const css = fs.readFileSync("static/styles.css", "utf8");
   assert.match(html, /name="color-scheme" content="light"/);

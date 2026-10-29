@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from app import create_app
@@ -16,6 +17,45 @@ CSRF = {"X-Requested-With": "Splice"}
 
 
 class AuthRuntimeTests(unittest.TestCase):
+    def test_clipboard_whitespace_with_real_argon2(self):
+        password = "synthetic password with spaces"
+        (ROOT / "data").mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=ROOT / "data") as directory:
+            config = Settings(Path(directory), "https://testserver", "", bytes(32), False)
+            application = create_app(config)
+            with patch.dict(os.environ, {"ADMIN_PASSWORD": "\t " + password + "\r\n"}):
+                with TestClient(application, base_url=config.origin) as client:
+                    auth = application.state.auth
+                    for padding in ("\n", " \t\r\n", "\u00a0", " " * 140):
+                        with self.subTest(padding=repr(padding)):
+                            user = auth.authenticate(" " + ADMIN_EMAIL.upper() + " ", padding + password + padding, "test")
+                            auth.reauthenticate(user, padding + password + padding, "test")
+                    with self.assertRaises(HTTPException) as error:
+                        auth.authenticate(ADMIN_EMAIL, password.replace(" ", ""), "test")
+                    self.assertEqual(error.exception.status_code, 401)
+                    with self.assertRaises(HTTPException) as error:
+                        auth.reauthenticate(user, password.replace(" ", ""), "test")
+                    self.assertEqual(error.exception.status_code, 401)
+                    # Reset consumed test limits before exercising the HTTP boundary.
+                    with application.state.store.db() as db:
+                        db.execute("DELETE FROM limits")
+                    response = client.post("/api/login", headers=CSRF,
+                                           json={"email": " " + ADMIN_EMAIL.upper() + " ", "password": password + "\n"})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(client.get("/api/session").json(), {"email": ADMIN_EMAIL, "admin": True})
+                    changed = "another synthetic password"
+                    response = client.post("/api/password", headers=CSRF,
+                                           json={"password": "\t" + password + "\n", "newPassword": " " + changed + "\n"})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(client.post("/api/login", headers=CSRF,
+                                                 json={"email": ADMIN_EMAIL, "password": changed}).status_code, 200)
+                    response = client.post("/api/admin/users", headers=CSRF,
+                                           json={"email": "viewer@example.test", "action": "add",
+                                                 "password": changed + "\n", "initialPassword": " " + password + "\n"})
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(client.post("/api/login", headers=CSRF,
+                                                 json={"email": "viewer@example.test", "password": password}).status_code, 200)
+
     def test_local_login_recent_restart_and_logout(self):
         (ROOT / "data").mkdir(exist_ok=True)
         for base in ("", "/tools"):

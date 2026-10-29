@@ -9,7 +9,11 @@ $("login-form").addEventListener("submit", async (event) => {
     const response = await fetch(base + "/api/login", {method: "POST", headers: {"Content-Type": "application/json", "X-Requested-With": "Splice"},
       body: JSON.stringify({email: $("email").value, password: $("password").value})});
     $("password").value = "";
-    if (!response.ok) throw new Error(response.status === 429 ? "Too many attempts. Try again later." : "Invalid email or password");
+    if (!response.ok) {
+      if (response.status === 401) throw new Error("Invalid email or password");
+      if (response.status === 429) throw new Error("Too many attempts. Try again later.");
+      throw new Error("Unable to sign in. Try again.");
+    }
     window.location.assign(base + "/");
   } catch (error) {
     $("login-error").textContent = error.message === "Invalid email or password" || error.message.startsWith("Too many") ? error.message : "Unable to sign in. Try again.";
