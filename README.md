@@ -1,6 +1,6 @@
 # Splice
 
-Splice turns an uploaded video into an original player, a strip of cuts and editable transcripts. The interface is light only, with blue branding. Choose a cut to see its video on the left and transcript/duration on the right; smaller screens stack these. **New Video is the last chip** and asks once before clearing the current workspace. The homepage lists each account's latest **10** jobs; older job records, originals, audio and clips are hard-deleted.
+Splice turns an uploaded video into an original player, a strip of cuts and editable transcripts. The interface is light only, with blue branding. Choose a cut to see its video on the left and transcript/duration on the right; smaller screens stack these. **New Video is the last chip** and asks once before clearing the current workspace. Recent videos and Original/Cut cards show first-frame thumbnails. The homepage lists each account's latest **10** jobs; older job records, originals, audio and clips are hard-deleted.
 
 Uploads are **MP4, MOV or WebM only**, up to **200 MiB, 300 seconds, 1920 × 1920 and 60 fps**. There is no URL downloader, Instagram, yt-dlp, local-path API or public media directory. ffmpeg detects hard changes above scene score 0.25, ignoring boundaries within 0.12 seconds of each other. It creates H.264/AAC MP4 cuts; Whisper supplies starting transcripts when the offline model is available. Edits save to the authenticated job, not browser storage.
 
@@ -8,12 +8,12 @@ Uploads are **MP4, MOV or WebM only**, up to **200 MiB, 300 seconds, 1920 × 192
 
 Read [the security brief](docs/splice-security-brief.md) and [implementation/verification status](docs/security-verification.md) before DNS or creator access.
 
-- Only approved emails can sign in. There is no signup. The administrator is hard-bound to `lukesa100@gmail.com`; admin access never grants access to another account's media.
-- The admin page adds/removes access with password re-authentication. It records the actor, action, subject and timestamp. Removing access or resetting an account's initial password immediately revokes its sessions.
+- Anyone can create an account with their own password. Applicants remain pending until accepted; only approved accounts can sign in. The administrator is hard-bound to `lukesa100@gmail.com`; admin access never grants access to another account's media.
+- Manage access lists pending applicants with Accept/Decline and approved accounts with Remove. Every decision requires administrator password re-authentication and records the actor, action, subject and timestamp. Accept preserves the applicant's password; Remove revokes their sessions. Duplicate signup never changes an existing password or access decision and returns the same response as a new application. Declined/removed accounts cannot reapply through duplicate signup.
 - All jobs, originals, cuts, transcript reads/writes, downloads, `HEAD` and byte-range requests check the logged-in owner. Cross-account objects return 404. Private responses use `Cache-Control: no-store`.
 - Session identifiers are random, HMAC-hashed in SQLite, rotated on login and revoked on logout. Production cookies are host-only, Secure, HttpOnly and SameSite=Lax; server expiry is 30 minutes idle / 10 hours absolute.
 - Mutations—including login—require `X-Requested-With: Splice`; supplied Origin must match the configured origin and cross-site Fetch Metadata is rejected. No cross-origin permissions are enabled. GET does not mutate user data.
-- Login limits: 5 attempts/account and 20/IP per 15 minutes, with a global cap. Upload/create: 5/hour/account, 10/hour/IP, one active job/account, two active jobs across the service and one processing worker. Limits survive restarts and return 429 with Retry-After.
+- Login limits: 5 attempts/account and 20/IP per 15 minutes, with a global cap. Signup: 3 attempts/email, 5/IP and 50 globally per hour, before password hashing. Upload/create: 5/hour/account, 10/hour/IP, one active job/account, two active jobs across the service and one processing worker. Limits survive restarts and return 429 with Retry-After.
 - Files use generated user/job UUIDs outside the webroot. A bounded streaming parser rejects unsafe filenames and extra form fields. Magic bytes, a restricted ffprobe, codec/duration/resolution/frame-rate limits and common HTML/PHP/playlist signatures are checked before decoding.
 - All media commands use argv arrays, `shell=False`, fixed binary paths, no stdin and input protocol `file` only. Playlist demuxers are disabled. Outputs, threads, per-command and total job time are bounded. Decoders inherit a minimal environment without application secrets. Whisper runs in a reusable, killable child and is strictly offline.
 - Partial output/audio is removed on failure, timeout or restart; a ten-minute sweep removes orphan directories older than two hours. SQLite and uploads share the private volume. No media has a static-files mount.
@@ -29,6 +29,7 @@ node --test tests/test_ui.js
 node --check static/app.js
 node --check static/login.js
 node --check static/admin.js
+node --check static/signup.js
 ./scripts/smoke_local.sh
 sh -n start.sh stop.sh scripts/smoke_local.sh
 python3 scripts/audit_dependencies.py

@@ -23,7 +23,8 @@ class Store:
                 PRAGMA journal_mode=WAL;
                 CREATE TABLE IF NOT EXISTS users (
                     id TEXT PRIMARY KEY, email TEXT UNIQUE NOT NULL,
-                    password_hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1);
+                    password_hash TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
+                    status TEXT NOT NULL DEFAULT 'approved');
                 CREATE TABLE IF NOT EXISTS sessions (
                     digest TEXT PRIMARY KEY, user_id TEXT NOT NULL,
                     created REAL NOT NULL, touched REAL NOT NULL);
@@ -37,6 +38,9 @@ class Store:
                 CREATE TABLE IF NOT EXISTS audit (
                     created REAL NOT NULL, actor TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL);
             """)
+            if "status" not in {row["name"] for row in db.execute("PRAGMA table_info(users)")}:
+                db.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'")
+                db.execute("UPDATE users SET status='removed' WHERE enabled=0")
 
     @contextmanager
     def db(self):

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="light">
   <meta name="theme-color" content="#F5F8FF">
-  <title>Splice — Your cut sheet</title>
+  <title>Splice</title>
   <link rel="stylesheet" href="__BASE__/static/styles.css">
   <script src="__BASE__/static/app.js" defer></script>
 </head>
@@ -24,21 +24,20 @@
           <svg class="upload-glyph" width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
             <path d="M16 22V5m-6 6 6-6 6 6M6 21v6h20v-6"/>
           </svg>
-          <h1 id="empty-title">Make every cut count</h1>
+          <h1 id="empty-title">Upload a video</h1>
           <button id="choose-video" class="primary-button" type="button">Choose video</button>
           <p id="upload-formats" class="upload-formats">MP4 · MOV · WEBM</p>
           <p id="upload-limits" class="upload-limits">Up to 200 MiB · 5 minutes · 1920 × 1920</p>
         </div>
         <p id="upload-error" class="error-message" role="alert" hidden></p>
-        <p class="upload-helper">Your video. Each cut. Room for your own words.</p>
-        <section class="recent-section" aria-labelledby="recent-title"><h2 id="recent-title">Recent videos</h2><p class="retention-note">Your latest 10 videos. Older videos and their cuts are deleted automatically.</p><div id="recent-jobs" class="recent-jobs"></div><p id="recent-error" class="error-message" role="status" hidden></p></section>
+        <section class="recent-section" aria-labelledby="recent-title"><h2 id="recent-title">Recent videos</h2><p class="retention-note">Latest 10 videos kept; older videos deleted.</p><div id="recent-jobs" class="recent-jobs"></div><p id="recent-error" class="error-message" role="status" hidden></p></section>
         <noscript><p class="error-message">Enable JavaScript to upload and view your cut sheet.</p></noscript>
       </div>
     </section>
 
     <section id="screen-loading" class="screen centred-screen" aria-labelledby="loading-title">
       <div class="loading-layout">
-        <h1 id="loading-title" class="screen-title" tabindex="-1">Analysing your reel…</h1>
+        <h1 id="loading-title" class="screen-title" tabindex="-1">Preparing video…</h1>
         <p class="source-meta"><span id="source-name"></span><span id="source-size"></span></p>
         <ol id="loading-stages" class="loading-stages" aria-label="Video preparation">
           <li data-stage="0"><span class="stage-marker" aria-hidden="true">1</span><span class="stage-name">Uploading</span><span class="stage-state">Waiting</span></li>
@@ -91,10 +90,10 @@
             <p id="selected-range" class="selected-range">00:00.00 – 00:00.00</p>
           </div>
           <div class="transcript-panel">
-            <label for="transcript">Edit what you'll say</label>
-            <textarea id="transcript" placeholder="No speech detected — type the line you'll record." spellcheck="true" aria-describedby="draft-note" maxlength="20000"></textarea>
+            <label for="transcript">Transcript</label>
+            <textarea id="transcript" placeholder="Type your transcript." spellcheck="true" aria-describedby="draft-note" maxlength="20000"></textarea>
             <div class="draft-meta"><span id="draft-state">Original transcript</span><span id="word-count">0 words</span></div>
-            <p id="draft-note" class="draft-note">Edits are saved privately to this video.</p>
+            <p id="draft-note" class="draft-note">Changes save automatically.</p>
             <div class="transcript-actions">
               <button id="reset-transcript" class="text-button" type="button" disabled>Reset transcript</button>
               <a id="download-clip" class="text-button" download>Download cut ↓</a>
@@ -104,7 +103,7 @@
       </div>
     </section>
     <dialog id="new-video-dialog" aria-labelledby="new-video-title" aria-describedby="new-video-copy">
-      <h2 id="new-video-title">Start a new video?</h2><p id="new-video-copy">The current video will no longer stay visible in this workspace. You can reopen it from Recent videos while it is within your latest 10.</p>
+      <h2 id="new-video-title">Start a new video?</h2><p id="new-video-copy">Your current video will stay in Recent.</p>
       <div class="dialog-actions"><button id="new-video-cancel" class="secondary-button" type="button">Keep this video</button><button id="new-video-confirm" class="primary-button" type="button">Continue</button></div>
     </dialog>
   </main>

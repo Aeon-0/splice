@@ -82,11 +82,20 @@ function harness(base = "", initialResponses = [], account = {}) {
   const body = new Element("body");
   body.dataset.screen = "empty";
   body.dataset.basePath = base;
+  const created = [];
   const document = {
     body,
     getElementById: (id) => elements.get(id),
     querySelectorAll: () => stages,
-    createElement: (tag) => new Element(tag),
+    createElement: (tag) => {
+      const element = new Element(tag);
+      if (tag === "canvas") {
+        element.getContext = () => ({drawImage() {}});
+        element.toDataURL = () => "data:image/jpeg;base64,c3ludGhldGlj";
+      }
+      created.push(element);
+      return element;
+    },
     createElementNS: (_, tag) => new Element(tag),
     addEventListener() {},
   };
@@ -139,7 +148,7 @@ function harness(base = "", initialResponses = [], account = {}) {
   });
   vm.runInContext(source, context);
   return {
-    $: (id) => elements.get(id), body, context, requests, responses, fetches, stages,
+    $: (id) => elements.get(id), body, context, requests, responses, fetches, stages, created,
     upload(file = { name: "reel.mp4", size: 8 * 1024 * 1024 }) {
       elements.get("video-file").files = [file];
       elements.get("video-file").emit("change");
@@ -253,7 +262,7 @@ test("New Video resets after one Continue; cancellation preserves the player", a
   ui.upload().respond(job("complete"));
   ui.$("cut-strip").children.at(-1).click();
   assert.equal(ui.$("new-video-dialog").open, true);
-  assert.match(ui.$("new-video-copy").textContent, /no longer stay visible/);
+  assert.match(ui.$("new-video-copy").textContent, /stay in Recent/);
   ui.$("new-video-cancel").click();
   assert.equal(ui.body.dataset.screen, "result");
   assert.equal(ui.$("clip-player").src, "/media/sample-job/original");
@@ -338,7 +347,10 @@ test("homepage loads recent jobs without storing private drafts in browser stora
   assert.equal(ui.$("account-email").textContent, "alice@example.test");
   assert.equal(ui.$("admin-link").hidden, true);
   assert.equal(ui.$("recent-jobs").children.length, 1);
-  assert.equal(ui.$("recent-jobs").children[0].children[0].textContent, "Saved reel.mp4");
+  const card = ui.$("recent-jobs").children[0];
+  assert.equal(card.children[0].className, "cut-thumbnail");
+  assert.match(card.children[1].textContent, /3 cuts/);
+  assert.doesNotMatch(card.getAttribute("aria-label"), /Saved reel/);
   ui.$("recent-jobs").children[0].click();
   await settle();
   assert.equal(ui.body.dataset.screen, "result");
@@ -362,4 +374,119 @@ test("admin account link and sign out use the signed-in session", async () => {
   assert.equal(ui.fetches.at(-2).url, "/tools/api/logout");
   assert.equal(ui.fetches.at(-2).options.method, "POST");
   assert.equal(ui.fetches.at(-1), "redirect:/tools/login");
+});
+
+
+test("Original and Cut 1 share a decoded thumbnail; arrow keys include Original", () => {
+  const ui = harness();
+  ui.upload().respond(job("complete"));
+  const cards = ui.$("cut-strip").children;
+  assert.equal(cards[0].children[1].textContent, "Original");
+  assert.equal(cards[1].children[1].textContent, "Cut 1");
+  const preview = ui.created.find(el => el.tagName === "VIDEO");
+  assert.equal(preview.src, job().cuts[0].videoUrl);
+  preview.videoWidth = 1080; preview.videoHeight = 1920;
+  preview.emit("loadeddata");
+  const original = cards[0].children[0].children[1];
+  const cut = cards[1].children[0].children[1];
+  assert.equal(original.hidden, false);
+  assert.equal(original.src, cut.src);
+  assert.match(original.src, /^data:image\/jpeg/);
+  assert.equal(ui.$("clip-player").src, job().originalUrl);
+  cards[0].emit("keydown", {key: "ArrowRight"});
+  assert.equal(ui.$("clip-player").src, job().cuts[0].videoUrl);
+  cards[1].emit("keydown", {key: "ArrowLeft"});
+  assert.equal(ui.$("clip-player").src, job().originalUrl);
+});
+
+test("Recent decodes first frames and cancels stale previews when opening a video", async () => {
+  const recent = {...job("complete"), createdAt: 1793200000};
+  const ui = harness("", [recent], {jobs: [recent]});
+  await settle();
+  const preview = ui.created.find(el => el.tagName === "VIDEO");
+  assert.equal(preview.src, recent.cuts[0].videoUrl);
+  preview.videoWidth = 1080; preview.videoHeight = 1920;
+  const img = ui.$("recent-jobs").children[0].children[0].children[1];
+  preview.emit("loadeddata");
+  assert.equal(img.hidden, false);
+  assert.match(img.src, /^data:image\/jpeg/);
+  ui.$("recent-jobs").children[0].click();
+  await settle();
+  assert.equal(preview.src, null);
+  assert.equal(ui.$("clip-player").src, recent.originalUrl);
+});
+
+test("signup redirects to thanks and reports validation, throttling and failures", async () => {
+  const signupSource = fs.readFileSync("static/signup.js", "utf8");
+  for (const base of ["", "/tools"]) {
+    for (const status of [202, 400, 429, 500, 0]) {
+      const elements = new Map(["signup-form", "create-account", "signup-error", "email", "password"].map(id => [id, new Element()]));
+      elements.get("email").value = "test@example.test";
+      elements.get("password").value = "synthetic-test-password";
+      let redirected;
+      const context = vm.createContext({
+        document: {body: {dataset: {basePath: base}}, getElementById: id => elements.get(id)},
+        window: {location: {assign: url => { redirected = url; }}},
+        fetch: async (url, options) => {
+          assert.equal(url, base + "/api/signup");
+          assert.equal(options.headers["X-Requested-With"], "Splice");
+          assert.equal(JSON.parse(options.body).email, "test@example.test");
+          if (!status) throw new Error("Network failure");
+          return {ok: status === 202, status, json: async () => ({detail: "Enter a valid email address."})};
+        },
+      });
+      vm.runInContext(signupSource, context);
+      await elements.get("signup-form").listeners.get("submit")[0]({preventDefault() {}});
+      assert.equal(elements.get("create-account").disabled, false);
+      assert.equal(elements.get("password").value, "");
+      assert.equal(elements.get("signup-error").hidden, status === 202);
+      if (status === 202) assert.equal(redirected, base + "/signup/thanks");
+      else {
+        assert.equal(redirected, undefined);
+        assert.match(elements.get("signup-error").textContent, status === 429 ? /Too many/ : status === 400 ? /valid email/ : /Unable to create/);
+      }
+    }
+  }
+});
+
+test("admin lists applicants separately and requires reauth for Accept, Decline and Remove", async () => {
+  for (const base of ["", "/tools"]) {
+    const elements = new Map(["applicants", "users", "admin-password", "admin-status"].map(id => [id, new Element()]));
+    const users = [{email: "lukesa100@gmail.com", enabled: 1, status: "approved"},
+                   {email: "applicant@example.test", enabled: 0, status: "pending"},
+                   {email: "member@example.test", enabled: 1, status: "approved"}];
+    const calls = [];
+    const context = vm.createContext({
+      document: {body: {dataset: {basePath: base}}, getElementById: id => elements.get(id),
+                 createElement: tag => new Element(tag), querySelectorAll: () => []},
+      window: {location: {assign() { assert.fail("Approval must not redirect"); }}},
+      fetch: async (url, options) => {
+        calls.push({url, options});
+        assert.equal(url, base + "/api/admin/users");
+        return {ok: true, status: 200, json: async () => ({users})};
+      },
+    });
+    vm.runInContext(fs.readFileSync("static/admin.js", "utf8"), context);
+    await settle();
+    assert.equal(elements.get("applicants").children.length, 1);
+    assert.equal(elements.get("users").children.length, 2);
+    assert.equal(elements.get("users").children[0].children[1].children[0].textContent, "Administrator");
+    for (const [id, index, action] of [["applicants", 0, "accept"], ["applicants", 1, "decline"], ["users", 0, "remove"]]) {
+      const row = elements.get(id).children[id === "users" ? 1 : 0];
+      const button = row.children[1].children[index];
+      const before = calls.length;
+      button.click();
+      await settle();
+      assert.equal(calls.length, before);
+      assert.equal(elements.get("admin-password").focused, true);
+      elements.get("admin-password").value = "synthetic-admin-password";
+      button.click();
+      await settle();
+      const body = JSON.parse(calls.at(-2).options.body);
+      assert.equal(body.action, action);
+      assert.equal(body.password, "synthetic-admin-password");
+      assert.equal(Object.hasOwn(body, "initialPassword"), false);
+      assert.equal(elements.get("admin-password").value, "");
+    }
+  }
 });

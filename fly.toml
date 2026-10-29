@@ -2,7 +2,7 @@
 app = "splice-tools"
 primary_region = "lhr"
 kill_signal = "SIGTERM"
-kill_timeout = 330
+kill_timeout = 300
 
 [build]
   dockerfile = "Dockerfile"

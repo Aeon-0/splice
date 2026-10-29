@@ -67,7 +67,25 @@ class Auth:
             raise RuntimeError("ADMIN_PASSWORD must be 15–128 characters and not a common password.")
         with self.store.db() as db:
             if not db.execute("SELECT 1 FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone():
-                db.execute("INSERT INTO users VALUES (?,?,?,1)", (str(uuid.uuid4()), ADMIN_EMAIL, self.passwords.hash(password)))
+                db.execute("INSERT INTO users (id,email,password_hash,enabled) VALUES (?,?,?,1)", (str(uuid.uuid4()), ADMIN_EMAIL, self.passwords.hash(password)))
+
+    def signup(self, email, password, ip):
+        email = normalise_email(email)
+        password = normalise_password(password)
+        self.limit(("signup-ip:" + ip, 5, 3600), ("signup-account:" + email[:254], 3, 3600),
+                   ("signup-global", 50, 3600))
+        if not valid_email(email):
+            raise HTTPException(400, "Enter a valid email address.")
+        if not valid_password(password):
+            raise HTTPException(400, "Use a password of 15–128 characters; avoid common passwords.")
+        # Hash even duplicate submissions: the response must not reveal whether
+        # an email exists. Never replace an existing password or access decision.
+        hashed = self.passwords.hash(password)
+        with self.store.db() as db:
+            inserted = db.execute("INSERT INTO users (id,email,password_hash,enabled,status) VALUES (?,?,?,0,'pending') ON CONFLICT(email) DO NOTHING",
+                                  (str(uuid.uuid4()), email, hashed)).rowcount
+            if inserted:
+                self.audit(db, email, "apply", email)
 
     def limit(self, *buckets):
         """Consume limits atomically; keys are HMACs, never raw email or IP."""
@@ -166,7 +184,8 @@ class SecurityMiddleware:
         request = Request(scope)
         path = scope["path"]
         relative = "/" if settings.base_path and path == settings.base_path else path[len(settings.base_path):] if path.startswith(settings.base_path + "/") else path
-        public = relative in ("/api/health", "/login", "/api/login", "/static/styles.css", "/static/login.js", "/static/favicon.svg")
+        public = relative in ("/api/health", "/login", "/api/login", "/signup", "/signup/thanks", "/api/signup", "/static/signup.js",
+                              "/static/styles.css", "/static/login.js", "/static/favicon.svg")
 
         started = False
 

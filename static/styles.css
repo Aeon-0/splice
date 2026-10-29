@@ -129,7 +129,6 @@ button:active:not(:disabled), a.text-button:active { transform: scale(0.97); }
 .upload-formats, .upload-limits { color: var(--ink-muted); font-size: var(--t-xs); }
 .upload-formats { margin-top: var(--s-5); }
 .upload-limits { margin-top: var(--s-1); }
-.upload-helper { margin-top: var(--s-5); text-align: center; color: var(--ink-muted); font-size: var(--t-sm); }
 .error-message { color: var(--ink); border-left: 2px solid var(--danger); padding-left: var(--s-3); font-size: var(--t-sm); overflow-wrap: anywhere; }
 #upload-error { margin-top: var(--s-4); }
 
@@ -180,9 +179,6 @@ button:active:not(:disabled), a.text-button:active { transform: scale(0.97); }
 .cut-thumbnail { position: relative; display: grid; place-items: center; aspect-ratio: 9 / 16; overflow: hidden; background: var(--bg-elev-2); border-radius: var(--r-sm); }
 .cut-thumbnail img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .thumbnail-placeholder { font-family: var(--font-mono); font-size: var(--t-title); color: var(--ink-faint); }
-.cut-duration { position: absolute; bottom: var(--s-1); right: var(--s-1); padding: 0 var(--s-1); background: var(--bg-elev); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-sm); font-family: var(--font-mono); font-size: var(--t-xs); font-variant-numeric: tabular-nums; }
-.selected-play { position: absolute; top: var(--s-1); left: var(--s-1); display: none; place-items: center; width: var(--s-5); height: var(--s-5); border-radius: var(--r-sm); background: var(--bg-elev); }
-.cut-card[aria-pressed="true"] .selected-play { display: grid; }
 .cut-label { display: block; margin-top: var(--s-2); font-size: var(--t-xs); font-weight: 500; }
 .result-warning { border-left: 2px solid var(--line-strong); padding-left: var(--s-3); margin-bottom: var(--s-5); color: var(--ink-muted); font-size: var(--t-sm); }
 .cut-editor { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--s-4); align-items: start; }
@@ -247,10 +243,10 @@ nav { display: flex; align-items: center; gap: var(--s-2); }
 .recent-section { margin-top: var(--s-7); }
 .recent-section h2 { font-size: var(--t-body); }
 .retention-note { font-size: var(--t-xs); color: var(--ink-muted); margin: var(--s-2) 0 var(--s-4); }
-.recent-jobs { display: grid; gap: var(--s-2); }
-.recent-job { width: 100%; text-align: left; background: var(--bg-elev); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-md); padding: var(--s-4); display: grid; gap: var(--s-1); }
+.recent-jobs { display: grid; grid-template-columns: repeat(auto-fill, minmax(128px, 1fr)); gap: var(--s-3); }
+.recent-job { width: 100%; text-align: left; background: var(--bg-elev); color: var(--ink); border: 1px solid var(--line); border-radius: var(--r-md); padding: var(--s-2); display: grid; gap: var(--s-2); align-content: start; }
 .recent-job:hover { border-color: var(--accent); }
-.recent-job span { font-size: var(--t-xs); color: var(--ink-muted); }
+.recent-meta { font-size: var(--t-xs); color: var(--ink-muted); }
 .new-video-card { border: 1px dashed var(--line-strong); text-align: center; color: var(--accent); min-height: 140px; }
 .new-video-card span { display: block; font-size: 32px; }
 dialog { max-width: 460px; width: calc(100% - 32px); border: 1px solid var(--line); border-radius: var(--r-lg); padding: var(--s-6); background: var(--bg-elev); color: var(--ink); box-shadow: var(--shadow-2); }
@@ -266,3 +262,11 @@ dialog h2 { font-size: var(--t-title); margin-bottom: var(--s-4); }
 .admin-page { max-width: 720px; }
 .access-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); border-bottom: 1px solid var(--line); padding: var(--s-3) 0; overflow-wrap: anywhere; }
 @media (max-width: 600px) { .account-email { display: none; } .top-bar { padding-inline: var(--s-4); } .auth-page { margin: var(--s-5) var(--s-4); } }
+
+.recent-job .cut-thumbnail { aspect-ratio: 4 / 3; }
+.access-section { margin-top: var(--s-5); }
+.access-section h2 { font-size: var(--t-body); }
+.access-actions { display: flex; flex-wrap: wrap; gap: var(--s-2); flex-shrink: 0; }
+.access-actions .primary-button { margin: 0; }
+.access-actions > span { font-size: var(--t-xs); color: var(--ink-muted); }
+@media (max-width: 480px) { .access-row { flex-wrap: wrap; } }

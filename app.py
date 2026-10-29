@@ -79,19 +79,33 @@ def create_app(settings=None, passwords=None):
     def login_page():
         return page("login.html")
 
+    @application.get(base + "/signup")
+    def signup_page():
+        return page("signup.html")
+
+    @application.get(base + "/signup/thanks")
+    def signup_thanks():
+        return page("signup-thanks.html")
+
     @application.get(base + "/admin")
     def admin_page():
         return page("admin.html")
 
     @application.get(base + "/static/{name}")
     def static(name: str):
-        if name not in {"styles.css", "app.js", "login.js", "admin.js", "favicon.svg"}:
+        if name not in {"styles.css", "app.js", "login.js", "signup.js", "admin.js", "favicon.svg"}:
             raise HTTPException(404, "Not found.")
         return FileResponse(ROOT / "static" / name)
 
     @application.api_route(base + "/api/health", methods=["GET", "HEAD"])
     def health():
         return {"status": "ok"}
+
+    @application.post(base + "/api/signup", status_code=202)
+    async def signup(request: Request):
+        body = await body_json(request)
+        await run_in_threadpool(application.state.auth.signup, body.get("email"), body.get("password"), request.state.ip)
+        return {"ok": True}
 
     @application.post(base + "/api/login")
     async def login(request: Request):
@@ -238,35 +252,30 @@ def create_app(settings=None, passwords=None):
     @application.get(base + "/api/admin/users")
     def users():
         with application.state.store.db() as db:
-            rows = db.execute("SELECT email,enabled FROM users ORDER BY email").fetchall()
+            rows = db.execute("SELECT email,enabled,status FROM users WHERE enabled=1 OR status='pending' ORDER BY email").fetchall()
         return {"users": [dict(row) for row in rows]}
 
     @application.post(base + "/api/admin/users")
-    async def allowlist(request: Request):
+    async def manage_access(request: Request):
         body = await body_json(request)
         store, auth = application.state.store, application.state.auth
         actor = request.state.user
         await run_in_threadpool(auth.reauthenticate, actor, body.get("password"), request.state.ip)
         email = normalise_email(body.get("email"))
         action = body.get("action")
-        if not valid_email(email) or action not in ("add", "remove"):
-            raise HTTPException(400, "Enter an email and choose add or remove.")
+        if not valid_email(email) or action not in ("accept", "decline", "remove"):
+            raise HTTPException(400, "Choose an applicant to accept or decline, or an account to remove.")
         if email == ADMIN_EMAIL:
             raise HTTPException(400, "The administrator's access cannot be changed here.")
-        hashed = None
-        if action == "add":
-            password = normalise_password(body.get("initialPassword"))
-            if not valid_password(password):
-                raise HTTPException(400, "Use an initial password of 15–128 characters; avoid common passwords.")
-            hashed = await run_in_threadpool(auth.passwords.hash, password)
         with store.db() as db:
-            if action == "add":
-                import uuid
-                db.execute("INSERT INTO users VALUES (?,?,?,1) ON CONFLICT(email) DO UPDATE SET enabled=1,password_hash=excluded.password_hash",
-                           (str(uuid.uuid4()), email, hashed))
-            else:
-                db.execute("UPDATE users SET enabled=0 WHERE email=?", (email,))
-            db.execute("DELETE FROM sessions WHERE user_id IN (SELECT id FROM users WHERE email=?)", (email,))
+            row = db.execute("SELECT id,enabled,status FROM users WHERE email=?", (email,)).fetchone()
+            if not row:
+                raise HTTPException(404, "Account not found.")
+            if (action in ("accept", "decline") and row["status"] != "pending") or (action == "remove" and not row["enabled"]):
+                raise HTTPException(409, "This account has changed. Refresh the page.")
+            status = {"accept": "approved", "decline": "declined", "remove": "removed"}[action]
+            db.execute("UPDATE users SET enabled=?,status=? WHERE id=?", (int(action == "accept"), status, row["id"]))
+            db.execute("DELETE FROM sessions WHERE user_id=?", (row["id"],))
             auth.audit(db, actor["email"], action, email)
         return {"ok": True}
 

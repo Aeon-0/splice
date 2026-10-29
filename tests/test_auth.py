@@ -49,9 +49,10 @@ class AuthRuntimeTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 200)
                     self.assertEqual(client.post("/api/login", headers=CSRF,
                                                  json={"email": ADMIN_EMAIL, "password": changed}).status_code, 200)
+                    self.assertEqual(client.post("/api/signup", headers=CSRF,
+                                                 json={"email": "viewer@example.test", "password": " " + password + "\n"}).status_code, 202)
                     response = client.post("/api/admin/users", headers=CSRF,
-                                           json={"email": "viewer@example.test", "action": "add",
-                                                 "password": changed + "\n", "initialPassword": " " + password + "\n"})
+                                           json={"email": "viewer@example.test", "action": "accept", "password": changed + "\n"})
                     self.assertEqual(response.status_code, 200)
                     self.assertEqual(client.post("/api/login", headers=CSRF,
                                                  json={"email": "viewer@example.test", "password": password}).status_code, 200)
@@ -91,10 +92,10 @@ class AuthRuntimeTests(unittest.TestCase):
                             ids.append(job_id)
                         expected = ids[-10:][::-1]
                         self.assertEqual([j["jobId"] for j in client.get(base + "/api/jobs").json()["jobs"]], expected)
-                        # The allowlist uses the real password provider too.
+                        self.assertEqual(client.post(base + "/api/signup", headers=CSRF,
+                                                     json={"email": "viewer@example.test", "password": PASSWORD}).status_code, 202)
                         response = client.post(base + "/api/admin/users", headers=CSRF,
-                                               json={"email": "viewer@example.test", "action": "add",
-                                                     "password": PASSWORD, "initialPassword": PASSWORD})
+                                               json={"email": "viewer@example.test", "action": "accept", "password": PASSWORD})
                         self.assertEqual(response.status_code, 200)
                         saved_cookies = client.cookies
 

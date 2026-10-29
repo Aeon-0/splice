@@ -50,7 +50,7 @@ class SecurityTests(unittest.TestCase):
         with self.store.db() as db:
             for email in ("alice@example.test", "bob@example.test"):
                 uid = str(uuid.uuid4())
-                db.execute("INSERT INTO users VALUES (?,?,?,1)", (uid, email, TestPasswords().hash(PASSWORD)))
+                db.execute("INSERT INTO users (id,email,password_hash,enabled) VALUES (?,?,?,1)", (uid, email, TestPasswords().hash(PASSWORD)))
                 self.users[email] = uid
             self.users[ADMIN_EMAIL] = db.execute("SELECT id FROM users WHERE email=?", (ADMIN_EMAIL,)).fetchone()[0]
 
@@ -201,12 +201,12 @@ class SecurityTests(unittest.TestCase):
     def test_csrf_all_mutations_and_no_get_side_effects(self):
         self.assertEqual(self.client.post("/api/login", json={}).status_code, 403)
         self.login(ADMIN_EMAIL)
-        for method, path in (("POST", "/api/analyze-file"), ("POST", "/api/logout"), ("POST", "/api/admin/users"), ("POST", "/api/password"),
+        for method, path in (("POST", "/api/signup"), ("POST", "/api/analyze-file"), ("POST", "/api/logout"), ("POST", "/api/admin/users"), ("POST", "/api/password"),
                              ("DELETE", "/api/jobs"), ("DELETE", "/api/jobs/x"), ("PUT", "/api/jobs/x/transcript/y")):
             self.assertEqual(self.client.request(method, path).status_code, 403, path)
             self.assertEqual(self.client.request(method, path, headers={**CSRF, "Origin": "https://evil.test"}).status_code, 403, path)
         self.assertEqual(self.client.post("/api/logout", headers={**CSRF, "Sec-Fetch-Site": "cross-site"}).status_code, 403)
-        for path in ("/api/login", "/api/logout", "/api/analyze-file"):
+        for path in ("/api/signup", "/api/login", "/api/logout", "/api/analyze-file"):
             self.assertEqual(self.client.get(path).status_code, 405)
         self.assertEqual(self.client.get("/api/session").status_code, 200)
 
@@ -274,11 +274,13 @@ class SecurityTests(unittest.TestCase):
         self.assertEqual(self.login(ADMIN_EMAIL).status_code, 200)
         payload.update(email=ADMIN_EMAIL)
         self.assertEqual(self.client.post("/api/admin/users", json=payload, headers=CSRF).status_code, 400)
-        payload.update(email="new@example.test", action="add", initialPassword=PASSWORD)
+        self.assertEqual(self.client.post("/api/signup", headers=CSRF,
+                                          json={"email": "new@example.test", "password": PASSWORD}).status_code, 202)
+        payload.update(email="new@example.test", action="accept")
         self.assertEqual(self.client.post("/api/admin/users", json=payload, headers=CSRF).status_code, 200)
         self.assertEqual(self.login("NEW@example.test").status_code, 200)
         with self.store.db() as db:
-            self.assertEqual(db.execute("SELECT COUNT(*) FROM audit").fetchone()[0], 2)
+            self.assertEqual(db.execute("SELECT COUNT(*) FROM audit").fetchone()[0], 3)
 
     def test_password_change_reauth_and_revocation(self):
         self.login()
@@ -349,6 +351,7 @@ class UploadTests(unittest.TestCase):
 
 class PipelineTests(unittest.TestCase):
     def setUp(self):
+        (ROOT / "data").mkdir(exist_ok=True)
         self.temp = tempfile.TemporaryDirectory(dir=ROOT / "data")
         self.directory = Path(self.temp.name)
         self.source = self.directory / "source.bin"

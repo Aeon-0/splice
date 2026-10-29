@@ -54,7 +54,7 @@ function flushSave() {
     try {
       await api("/api/jobs/" + encodeURIComponent(item.jobId) + "/transcript/" + encodeURIComponent(item.id),
         {method: "PUT", body: JSON.stringify({transcript: item.transcript})});
-      if (item.operation === operation) $("draft-note").textContent = "Saved privately to this video.";
+      if (item.operation === operation) $("draft-note").textContent = "Saved.";
       return true;
     } catch (error) {
       if (item.operation === operation) $("draft-note").textContent = "Not saved. " + error.message + " Copy your words before leaving.";
@@ -65,20 +65,29 @@ function flushSave() {
   return saves;
 }
 async function loadRecent() {
+  const token = operation;
   try {
     const result = await api("/api/jobs");
+    if (token !== operation || document.body.dataset.screen !== "empty") return;
+    clearThumbnails();
     $("recent-jobs").replaceChildren();
+    const thumbnails = [];
     for (const item of result.jobs) {
       const button = document.createElement("button");
       button.type = "button"; button.className = "recent-job";
-      const title = document.createElement("strong"); title.textContent = item.originalFilename || "Uploaded video";
-      const meta = document.createElement("span"); meta.textContent = new Date(item.createdAt * 1000).toLocaleDateString("en-GB") + " · " + (item.status === "complete" ? item.cuts.length + " cuts" : item.status);
-      button.append(title, meta);
+      const {poster, img} = thumbnailPoster("▶");
+      const meta = document.createElement("span"); meta.className = "recent-meta";
+      meta.textContent = new Date(item.createdAt * 1000).toLocaleDateString("en-GB") + " · " + (item.status === "complete" ? item.cuts.length + " cuts" : item.status);
+      button.setAttribute("aria-label", "Open video · " + meta.textContent);
+      button.append(poster, meta);
       button.addEventListener("click", () => openJob(item.jobId));
       $("recent-jobs").append(button);
+      const cut = item.cuts?.[0];
+      if (item.status === "complete" && cut) thumbnails.push({cut, images: [img], button});
     }
-    message("recent-error", result.jobs.length ? "" : "Your videos will appear here.");
-  } catch (error) { message("recent-error", error.message); }
+    message("recent-error", result.jobs.length ? "" : "No videos yet.");
+    observeThumbnails(thumbnails);
+  } catch (error) { if (token === operation) message("recent-error", error.message); }
 }
 async function openJob(id) {
   if (!await flushSave()) return;
@@ -96,7 +105,7 @@ async function openJob(id) {
 }
 function newVideo() {
   $("new-video-title").textContent = "Start a new video?";
-  $("new-video-copy").textContent = "The current video will no longer stay visible in this workspace. You can reopen it from Recent videos while it is within your latest 10.";
+  $("new-video-copy").textContent = "Your current video will stay in Recent.";
   $("new-video-confirm").textContent = "Continue";
   $("new-video-dialog").showModal();
 }
@@ -273,7 +282,7 @@ function startUpload(file) {
   $("dropzone").classList.remove("is-invalid", "is-dragging");
   $("dropzone").removeAttribute("aria-invalid");
   message("upload-error", "");
-  $("loading-title").textContent = "Analysing your reel…";
+  $("loading-title").textContent = "Preparing video…";
   $("loading-error").hidden = true;
   $("source-name").textContent = file.name;
   $("source-size").textContent = fileSize(file.size);
@@ -377,80 +386,58 @@ function renderJob(result) {
   renderResult();
 }
 
+function thumbnailPoster(fallback) {
+  const poster = document.createElement("span");
+  poster.className = "cut-thumbnail";
+  poster.setAttribute("aria-hidden", "true");
+  const placeholder = document.createElement("span");
+  placeholder.className = "thumbnail-placeholder";
+  placeholder.textContent = fallback;
+  const img = document.createElement("img");
+  img.alt = ""; img.hidden = true; img.decoding = "async";
+  poster.append(placeholder, img);
+  return {poster, img};
+}
 function renderResult() {
   clearThumbnails();
   $("cut-count").textContent = String(job.cuts.length);
   const total = job.sourceDuration ?? job.cuts.reduce((sum, cut) => sum + Number(cut.duration), 0);
   $("total-duration").textContent = "Total " + seconds(total);
   const warnings = (job.warnings || []).map((warning) => {
-    if (/no audio/i.test(warning)) return "This reel has no audio track. Type the words you'll record.";
-    if (/whisper|transcri/i.test(warning)) return "Transcription is unavailable for this reel. You can still type your own words.";
+    if (/no audio/i.test(warning)) return "No audio track.";
+    if (/whisper|transcri/i.test(warning)) return "Transcription unavailable. Type your transcript.";
     return warning;
   });
   message("result-warning", warnings.join(" "));
   selectedId = selectedId && job.cuts.some((cut) => cut.id === selectedId) ? selectedId : "original";
   $("cut-strip").replaceChildren();
-  const original = document.createElement("button");
-  original.type = "button"; original.className = "cut-card"; original.dataset.cutId = "original";
-  original.textContent = "Original · " + seconds(total);
-  original.addEventListener("click", () => selectCut("original", true));
-  $("cut-strip").append(original);
-  const thumbnails = [];
-  for (const [index, cut] of job.cuts.entries()) {
+  // Original shares Cut 1's poster; playback still uses the full original URL.
+  const cards = [{...job.cuts[0], id: "original"}, ...job.cuts];
+  const thumbnails = new Map();
+  for (const [index, cut] of cards.entries()) {
     const button = document.createElement("button");
-    button.type = "button";
-    button.className = "cut-card";
-    button.dataset.cutId = cut.id;
-    button.setAttribute("aria-pressed", String(cut.id === selectedId));
-    button.setAttribute("aria-label", "Cut " + (index + 1) + ", " + Number(cut.duration).toFixed(2) + " seconds. Play cut.");
-    button.tabIndex = cut.id === selectedId ? 0 : -1;
-    const poster = document.createElement("span");
-    poster.className = "cut-thumbnail";
-    poster.setAttribute("aria-hidden", "true");
-    const placeholder = document.createElement("span");
-    placeholder.className = "thumbnail-placeholder";
-    placeholder.textContent = String(index + 1).padStart(2, "0");
-    const img = document.createElement("img");
-    img.alt = "";
-    img.hidden = true;
-    img.decoding = "async";
-    const duration = document.createElement("span");
-    duration.className = "cut-duration";
-    duration.textContent = seconds(cut.duration);
-    const indicator = document.createElement("span");
-    indicator.className = "selected-play";
-    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    icon.setAttribute("width", "12");
-    icon.setAttribute("height", "12");
-    icon.setAttribute("viewBox", "0 0 12 12");
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", "M3 1.5v9L10 6z");
-    path.setAttribute("fill", "currentColor");
-    icon.append(path);
-    indicator.append(icon);
-    poster.append(placeholder, img, duration, indicator);
-    const label = document.createElement("span");
-    label.className = "cut-label";
-    label.textContent = "Cut " + (index + 1);
+    button.type = "button"; button.className = "cut-card"; button.dataset.cutId = cut.id;
+    const name = index === 0 ? "Original" : "Cut " + index;
+    button.setAttribute("aria-label", name);
+    const {poster, img} = thumbnailPoster(index === 0 ? "▶" : String(index).padStart(2, "0"));
+    const label = document.createElement("span"); label.className = "cut-label"; label.textContent = name;
     button.append(poster, label);
     button.addEventListener("click", () => selectCut(cut.id, true));
     button.addEventListener("keydown", (event) => {
       let target = index;
       if (event.key === "ArrowLeft") target = Math.max(0, index - 1);
-      else if (event.key === "ArrowRight") target = Math.min(job.cuts.length - 1, index + 1);
+      else if (event.key === "ArrowRight") target = Math.min(cards.length - 1, index + 1);
       else if (event.key === "Home") target = 0;
-      else if (event.key === "End") target = job.cuts.length - 1;
+      else if (event.key === "End") target = cards.length - 1;
       else return;
       event.preventDefault();
-      selectCut(job.cuts[target].id, false);
-      $("cut-strip").children[target + 1].focus({ preventScroll: true });
+      selectCut(cards[target].id, false);
+      $("cut-strip").children[target].focus({ preventScroll: true });
     });
     $("cut-strip").append(button);
-    const thumb = cut.thumb || cut.thumbnailUrl;
-    if (thumb) {
-      img.addEventListener("load", () => { img.hidden = false; });
-      img.src = thumb;
-    } else thumbnails.push({ cut, img, button });
+    const shared = thumbnails.get(cut.videoUrl);
+    if (shared) shared.images.push(img);
+    else thumbnails.set(cut.videoUrl, {cut, images: [img], button});
   }
   const add = document.createElement("button");
   add.type = "button"; add.className = "cut-card new-video-card"; add.id = "new-video";
@@ -460,7 +447,7 @@ function renderResult() {
   $("cut-strip").append(add);
   setScreen("result");
   selectCut(selectedId, false);
-  observeThumbnails(thumbnails);
+  observeThumbnails([...thumbnails.values()], $("cut-strip"));
 }
 function selectCut(id, play) {
   const index = job?.cuts.findIndex((cut) => cut.id === id) ?? -1;
@@ -498,7 +485,7 @@ function selectCut(id, play) {
   $("transcript").disabled = original;
   $("download-clip").textContent = original ? "Download original ↓" : "Download cut ↓";
   $("download-clip").download = original ? "splice-original" + (job.sourceSuffix || ".mp4") : "splice-cut-" + (index + 1) + ".mp4";
-  $("draft-note").textContent = original ? "Select a cut to edit its transcript." : "Edits are saved privately to this video.";
+  $("draft-note").textContent = original ? "Select a cut to edit its transcript." : "Changes save automatically.";
   $("previous-cut").disabled = index <= 0;
   $("next-cut").disabled = index === job.cuts.length - 1;
   updateDraftMeta();
@@ -516,9 +503,18 @@ function adjacentCut(offset) {
 }
 
 // Decode only nearby thumbnails, one at a time. The visible editor has one player.
-function observeThumbnails(items) {
+function observeThumbnails(items, root = null) {
+  items = items.filter(({cut, images}) => {
+    const thumb = cut.thumb || cut.thumbnailUrl;
+    if (!thumb) return true;
+    for (const img of images) {
+      img.addEventListener("load", () => { img.hidden = false; });
+      img.src = thumb;
+    }
+    return false;
+  });
   if (!("IntersectionObserver" in window)) {
-    thumbnailQueue.push(...items.slice(0, 8));
+    thumbnailQueue.push(...items);
     makeNextThumbnail();
     return;
   }
@@ -532,12 +528,12 @@ function observeThumbnails(items) {
       thumbnailObserver.unobserve(entry.target);
     }
     makeNextThumbnail();
-  }, { root: $("cut-strip"), rootMargin: "0px 160px" });
+  }, { root, rootMargin: "160px" });
   items.forEach((item) => thumbnailObserver.observe(item.button));
 }
 function makeNextThumbnail() {
   if (thumbnailCancel || !thumbnailQueue.length) return;
-  const { cut, img } = thumbnailQueue.shift();
+  const { cut, images } = thumbnailQueue.shift();
   const token = operation;
   const preview = document.createElement("video");
   preview.muted = true;
@@ -556,8 +552,8 @@ function makeNextThumbnail() {
         canvas.width = Math.max(1, Math.round(scale * preview.videoWidth));
         canvas.height = Math.max(1, Math.round(scale * preview.videoHeight));
         canvas.getContext("2d").drawImage(preview, 0, 0, canvas.width, canvas.height);
-        img.src = canvas.toDataURL("image/jpeg", 0.75);
-        img.hidden = false;
+        const frame = canvas.toDataURL("image/jpeg", 0.75);
+        for (const img of images) { img.src = frame; img.hidden = false; }
       } catch { /* A solid numbered poster remains usable without a decoded frame. */ }
     }
     preview.pause();
@@ -629,7 +625,7 @@ $("retry-upload").addEventListener("click", () => {
     failed = false;
     pollingFailures = 0;
     $("loading-error").hidden = true;
-    $("loading-title").textContent = "Analysing your reel…";
+    $("loading-title").textContent = "Preparing video…";
     $("loading-live").textContent = "Reconnecting to your reel.";
     renderStages();
     setProgress();
