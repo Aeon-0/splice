@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en-GB">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="color-scheme" content="light"><title>Manage access — Splice</title><link rel="stylesheet" href="__BASE__/static/styles.css"><script src="__BASE__/static/admin.js" defer></script></head>
+<body data-base-path="__BASE__">
+  <header class="top-bar"><a class="wordmark text-button" href="__BASE__/">Splice.</a><a class="text-button" href="__BASE__/">Back to videos</a></header>
+  <main class="auth-page admin-page">
+    <h1>Manage access</h1>
+    <form id="approve-form">
+      <label for="access-email">Approve an email</label>
+      <input id="access-email" type="email" autocomplete="off" maxlength="254" required>
+      <button id="approve-email" class="primary-button" type="submit">Approve</button>
+    </form>
+    <p id="admin-status" role="status" hidden></p>
+    <section class="access-section" aria-labelledby="applicants-title"><h2 id="applicants-title">Applicants</h2><div id="applicants"></div></section>
+    <section class="access-section" aria-labelledby="users-title"><h2 id="users-title">People with access</h2><div id="users"></div></section>
+  </main>
+</body>
+</html>

@@ -1,19 +1,24 @@
-"""Synthetic end-to-end smoke test; no network and no new dependencies."""
-
+"""Offline in-process smoke: synthetic media and synthetic test identities only."""
 import json
-import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-os.environ["SPLICE_OFFLINE"] = "1"
+sys.path.insert(0, str(ROOT / "tests"))
 
 from fastapi.testclient import TestClient
+from app import create_app
+from config import ADMIN_EMAIL, Settings
+from pipeline import FFMPEG, FFPROBE
+from test_app import CSRF, TEST_ADMIN_PASSWORD, seed_admin_password
 
-import app
+
+def command(argv):
+    return subprocess.run(argv, shell=False, stdin=subprocess.DEVNULL, capture_output=True, check=True, timeout=60)
 
 
 def wait_for_job(client, response):
@@ -21,85 +26,101 @@ def wait_for_job(client, response):
     job_id = response.json()["jobId"]
     deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
-        response = client.get(f"/api/jobs/{job_id}")
-        assert response.status_code == 200, response.text
-        result = response.json()
+        result = client.get(f"/api/jobs/{job_id}").json()
         if result["status"] == "failed":
-            raise AssertionError(result)
+            raise AssertionError(result["error"])
         if result["status"] == "complete":
             return result
-        time.sleep(0.1)
-    raise AssertionError("The synthetic job did not finish within 90 seconds.")
+        time.sleep(.05)
+    raise AssertionError("Synthetic video did not finish within 90 seconds.")
 
 
-def verify(client, result):
+def verify(client, store, owner, result):
     cuts = result["cuts"]
-    assert len(cuts) == 3, f"Expected 3 cuts, got {len(cuts)}: {result}"
+    assert len(cuts) == 3, f"Expected three cuts, got {len(cuts)}"
     for index, cut in enumerate(cuts):
-        assert cut["index"] == index + 1
-        assert abs(cut["start"] - index * 1.25) < 0.05, cut
-        assert abs(cut["duration"] - 1.25) < 0.05, cut
+        assert abs(cut["start"] - index * 1.25) < .05
+        assert abs(cut["duration"] - 1.25) < .05
         assert isinstance(cut["transcript"], str)
         response = client.get(cut["videoUrl"])
         assert response.status_code == 200 and response.content[4:8] == b"ftyp"
         response = client.get(cut["videoUrl"], headers={"Range": "bytes=0-63"})
         assert response.status_code == 206 and len(response.content) == 64
-        clip_path = app.MEDIA_DIR / result["jobId"] / f"clip-{index + 1:03d}.mp4"
-        duration, _ = app.probe_video(clip_path)
-        assert abs(duration - cut["duration"]) < 0.05, (duration, cut)
-        subprocess.run([app.FFMPEG, "-v", "error", "-i", str(clip_path), "-f", "null", "-"], check=True, capture_output=True)
-        pixel = subprocess.run([
-            app.FFMPEG, "-v", "error", "-i", str(clip_path), "-frames:v", "1", "-vf", "scale=1:1",
-            "-pix_fmt", "rgb24", "-f", "rawvideo", "-",
-        ], check=True, capture_output=True).stdout
-        red, green, blue = pixel
+        path = store.directory(owner, result["jobId"]) / f"clip-{index+1:03d}.mp4"
+        metadata = json.loads(command([FFPROBE, "-v", "error", "-protocol_whitelist", "file", "-show_format", "-of", "json", str(path)]).stdout)
+        assert abs(float(metadata["format"]["duration"]) - cut["duration"]) < .1
+        pixel = command([FFMPEG, "-nostdin", "-v", "error", "-protocol_whitelist", "file", "-i", str(path), "-frames:v", "1", "-vf", "scale=1:1", "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]).stdout
         if index == 0:
-            assert red > 180 and green < 50 and blue < 50, pixel
+            assert pixel[0] > 180 and pixel[1] < 50 and pixel[2] < 50
         elif index == 1:
-            assert min(pixel) > 220, pixel
+            assert min(pixel) > 220
         else:
-            assert max(pixel) < 30, pixel
-    return cuts
+            assert max(pixel) < 30
+    source = store.directory(owner, result["jobId"]) / "source.bin"
+    original = client.get(result["originalUrl"])
+    assert original.status_code == 200 and original.content == source.read_bytes()
+    head = client.head(result["originalUrl"])
+    assert head.status_code == 200 and int(head.headers["content-length"]) == source.stat().st_size
+    assert client.get(result["originalUrl"], headers={"Range": "bytes=0-31"}).status_code == 206
+    metadata = json.loads(command([FFPROBE, "-v", "error", "-show_format", "-of", "json", str(source)]).stdout)
+    assert abs(float(metadata["format"]["duration"]) - result["sourceDuration"]) < .1
+    assert result["sourceDuration"] > max(cut["duration"] for cut in cuts)
 
 
 def main():
-    sample_dir = ROOT / "data" / "sample"
-    sample_dir.mkdir(parents=True, exist_ok=True)
-    sample = sample_dir / "hard-cuts.mp4"
-    command = [app.FFMPEG, "-nostdin", "-hide_banner", "-loglevel", "error", "-y"]
-    for colour in ("red", "white", "black"):
-        command.extend(["-f", "lavfi", "-i", f"color=c={colour}:s=360x640:r=24:d=1.25"])
-    command.extend([
-        "-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0,format=yuv420p[v]", "-map", "[v]",
-        "-c:v", "libx264", "-preset", "ultrafast", "-threads", "2", "-movflags", "+faststart", str(sample),
-    ])
-    subprocess.run(command, check=True, capture_output=True)
-    with TestClient(app.app) as client:
-        assert client.get("/").status_code == 200
-        assert client.get("/static/app.js").status_code == 200
-        assert client.get("/api/health").json()["sceneThreshold"] == 0.3
-        with sample.open("rb") as video:
-            uploaded = wait_for_job(client, client.post("/api/analyze-file", files={"file": ("hard-cuts.mp4", video, "video/mp4")}))
-        cuts = verify(client, uploaded)
-        local = wait_for_job(client, client.post("/api/analyze", json={"filePath": "data/sample/hard-cuts.mp4"}))
-        verify(client, local)
-        # Exercise the audio/Whisper branch with silent audio, still strictly offline.
-        silent = sample_dir / "silent-audio.mp4"
-        subprocess.run([
-            app.FFMPEG, "-nostdin", "-v", "error", "-y", "-i", str(sample), "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
-            "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-shortest", str(silent),
-        ], check=True, capture_output=True)
-        with silent.open("rb") as video:
-            audio_result = wait_for_job(client, client.post("/api/analyze-file", files={"file": ("silent-audio.mp4", video, "video/mp4")}))
-        verify(client, audio_result)
-        assert all(cut["transcript"] == "" for cut in local["cuts"])
-        print("PASS: multipart upload, local path, queued jobs, 3 accurate scene clips, MP4 decoding, clip colours and HTTP byte ranges.")
-        print("PASS: silent-audio upload completed offline; transcript strings present on every cut.")
-        if audio_result["warnings"]:
-            print("Whisper: no cached model available; graceful empty-transcript fallback verified. No model download attempted.")
-        else:
-            print("Whisper: cached local model ran successfully on silent audio.")
-        print(json.dumps({"jobId": uploaded["jobId"], "status": uploaded["status"], "cutCount": len(cuts), "durations": [cut["duration"] for cut in cuts]}))
+    (ROOT / "data").mkdir(exist_ok=True)
+    with tempfile.TemporaryDirectory(dir=ROOT / "data") as temporary:
+        directory = Path(temporary)
+        sample = directory / "hard-cuts.mp4"
+        argv = [FFMPEG, "-nostdin", "-v", "error", "-y"]
+        for colour in ("red", "white", "black"):
+            argv.extend(["-f", "lavfi", "-i", f"color=c={colour}:s=360x640:r=24:d=1.25"])
+        argv.extend(["-filter_complex", "[0:v][1:v][2:v]concat=n=3:v=1:a=0,format=yuv420p[v]", "-map", "[v]", "-c:v", "libx264", "-preset", "ultrafast", "-threads", "2", str(sample)])
+        command(argv)
+        config = Settings(directory / "private", "https://testserver", "", bytes(32), False)
+        application = create_app(config)
+        with TestClient(application, base_url=config.origin) as client:
+            assert client.get("/api/jobs").status_code == 401
+            store = application.state.store
+            assert client.post("/api/login", headers=CSRF, json={"email": ADMIN_EMAIL}).status_code == 202
+            assert client.get("/api/session").status_code == 401
+            seed_admin_password(store)  # Synthetic password in this temporary DB only.
+            assert client.post("/api/admin/login", headers=CSRF,
+                               json={"email": ADMIN_EMAIL, "password": TEST_ADMIN_PASSWORD}).status_code == 200
+            assert client.get("/").status_code == 200
+            assert client.get("/api/admin/users").status_code == 200
+            with store.db() as db:
+                owner = db.execute("SELECT id FROM users").fetchone()[0]
+            with sample.open("rb") as stream:
+                result = wait_for_job(client, client.post("/api/analyze-file", files={"file": ("$(id).mp4", stream, "video/mp4")}, headers=CSRF))
+            verify(client, store, owner, result)
+            assert client.get("/api/jobs").json()["jobs"][0]["jobId"] == result["jobId"]
+            assert result["originalFilename"] == "$(id).mp4"
+            cut = result["cuts"][0]
+            path = f"/api/jobs/{result['jobId']}/transcript/{cut['id']}"
+            assert client.put(path, headers=CSRF, json={"transcript": "Synthetic edited words"}).status_code == 200
+            assert client.get(path).json()["transcript"] == "Synthetic edited words"
+            silent = directory / "silent.mp4"
+            command([FFMPEG, "-nostdin", "-v", "error", "-y", "-i", str(sample), "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono", "-map", "0:v", "-map", "1:a", "-c:v", "copy", "-c:a", "aac", "-shortest", str(silent)])
+            with silent.open("rb") as stream:
+                audio = wait_for_job(client, client.post("/api/analyze-file", files={"file": ("silent.mp4", stream, "video/mp4")}, headers=CSRF))
+            verify(client, store, owner, audio)
+            assert not list(store.uploads.glob("*/*/speech.wav"))
+            assert audio["warnings"], "Missing offline model should give an editable fallback"
+            # Real playlist input is rejected before expensive decoding.
+            malicious = client.post("/api/analyze-file", files={"file": ("playlist.mp4", b"#EXTM3U\nhttp://127.0.0.1/private", "video/mp4")}, headers=CSRF)
+            assert malicious.status_code == 202
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                rejected = client.get("/api/jobs/" + malicious.json()["jobId"]).json()
+                if rejected["status"] == "failed":
+                    break
+                time.sleep(.05)
+            assert rejected["status"] == "failed"
+            assert not store.directory(owner, rejected["jobId"]).exists()
+            assert client.delete("/api/jobs/" + result["jobId"], headers=CSRF).status_code == 200
+            assert client.get(result["originalUrl"]).status_code == 404
+        print("PASS: authenticated upload, three scene cuts, timings/colours, original and cut ranges, persisted transcript, hard deletion, playlist rejection and offline Whisper fallback.")
 
 
 if __name__ == "__main__":

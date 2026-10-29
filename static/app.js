@@ -1,9 +1,11 @@
 "use strict";
 
 const $ = (id) => document.getElementById(id);
+const BASE = document.body.dataset.basePath || "";
+const apiPath = (path) => BASE + path;
 const STAGES = ["Uploading", "Finding cuts", "Transcribing", "Ready"];
-const VIDEO_SUFFIXES = new Set(["mp4", "mov", "webm", "m4v", "mkv", "avi"]);
-const MAX_BYTES = 500 * 1024 * 1024;
+const VIDEO_SUFFIXES = new Set(["mp4", "mov", "webm"]);
+const MAX_BYTES = 200 * 1024 * 1024;
 const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 let job = null;
 let selectedId = null;
@@ -12,6 +14,7 @@ let drafts = {};
 let operation = 0;
 let uploadRequest = null;
 let pollController = null;
+let jobConnection = null;
 let pollTimer = null;
 let slowTimer = null;
 let pollingFailures = 0;
@@ -23,17 +26,91 @@ let thumbnailObserver = null;
 let thumbnailQueue = [];
 let thumbnailCancel = null;
 
-function store(key, value) {
+let saveTimer = null;
+let pendingSave = null;
+let saves = Promise.resolve(true);
+
+async function api(path, options = {}) {
+  const response = await fetch(apiPath(path), {cache: "no-store", ...options,
+    headers: {"X-Requested-With": "Splice", "Content-Type": "application/json", ...(options.headers || {})}});
+  if (response.status === 401) { window.location.assign(apiPath("/login")); throw new Error("Please sign in again."); }
+  const result = await response.json();
+  if (!response.ok) throw new Error(responseError(result));
+  return result;
+}
+function queueSave() {
+  if (!job || selectedId === "original") return;
+  clearTimeout(saveTimer);
+  if (pendingSave && (pendingSave.id !== selectedId || pendingSave.jobId !== job.jobId)) flushSave();
+  pendingSave = {jobId: job.jobId, id: selectedId, transcript: $("transcript").value, operation};
+  $("draft-note").textContent = "Saving…";
+  saveTimer = setTimeout(flushSave, 500);
+}
+function flushSave() {
+  clearTimeout(saveTimer);
+  const item = pendingSave;
+  if (!item) return saves;
+  pendingSave = null;
+  saves = saves.then(async () => {
+    try {
+      await api("/api/jobs/" + encodeURIComponent(item.jobId) + "/transcript/" + encodeURIComponent(item.id),
+        {method: "PUT", body: JSON.stringify({transcript: item.transcript})});
+      if (item.operation === operation) $("draft-note").textContent = "Saved.";
+      return true;
+    } catch (error) {
+      if (item.operation === operation) $("draft-note").textContent = "Not saved. " + error.message + " Copy your words before leaving.";
+      if (!pendingSave) pendingSave = item;
+      return false;
+    }
+  });
+  return saves;
+}
+async function loadRecent() {
+  const token = operation;
   try {
-    sessionStorage.setItem(key, JSON.stringify(value));
-    return true;
-  } catch {
-    return false;
-  }
+    const result = await api("/api/jobs");
+    if (token !== operation || document.body.dataset.screen !== "empty") return;
+    clearThumbnails();
+    $("recent-jobs").replaceChildren();
+    const thumbnails = [];
+    for (const item of result.jobs) {
+      const button = document.createElement("button");
+      button.type = "button"; button.className = "recent-job";
+      const {poster, img} = thumbnailPoster("▶");
+      const meta = document.createElement("span"); meta.className = "recent-meta";
+      meta.textContent = new Date(item.createdAt * 1000).toLocaleDateString("en-GB") + " · " + (item.status === "complete" ? item.cuts.length + " cuts" : item.status);
+      button.setAttribute("aria-label", "Open video · " + meta.textContent);
+      button.append(poster, meta);
+      button.addEventListener("click", () => openJob(item.jobId));
+      $("recent-jobs").append(button);
+      const cut = item.cuts?.[0];
+      if (item.status === "complete" && cut) thumbnails.push({cut, images: [img], button});
+    }
+    message("recent-error", result.jobs.length ? "" : "No videos yet.");
+    observeThumbnails(thumbnails);
+  } catch (error) { if (token === operation) message("recent-error", error.message); }
 }
-function retrieve(key, fallback) {
-  try { return JSON.parse(sessionStorage.getItem(key)) ?? fallback; } catch { return fallback; }
+async function openJob(id) {
+  if (!await flushSave()) return;
+  stopWork();
+  const token = operation;
+  try {
+    const result = await fetchJob(id);
+    if (token !== operation) return;
+    drafts = {}; selectedId = null; currentStage = -1;
+    $("source-name").textContent = result.originalFilename || "Uploaded video";
+    $("source-size").textContent = "";
+    renderJob(result);
+    if (!["complete", "failed"].includes(result.status)) schedulePoll(id, token);
+  } catch (error) { message("recent-error", error.message); }
 }
+function newVideo() {
+  $("new-video-title").textContent = "Start a new video?";
+  $("new-video-copy").textContent = "Your current video will stay in Recent.";
+  $("new-video-confirm").textContent = "Continue";
+  $("new-video-dialog").showModal();
+}
+
 function message(id, value) {
   $(id).textContent = value || "";
   $(id).hidden = !value;
@@ -63,11 +140,14 @@ function clearThumbnails() {
   thumbnailCancel?.();
 }
 function stopWork() {
+  flushSave();
   operation += 1;
   clearTimeout(pollTimer);
   clearTimeout(slowTimer);
   pollController?.abort();
   pollController = null;
+  jobConnection?.close();
+  jobConnection = null;
   uploadRequest?.abort();
   uploadRequest = null;
   clearThumbnails();
@@ -89,8 +169,9 @@ function resetWorkspace() {
   $("dropzone").classList.remove("is-invalid", "is-dragging");
   $("dropzone").removeAttribute("aria-invalid");
   message("upload-error", "");
-  store("splice-job", null);
+
   setScreen("empty");
+  loadRecent();
 }
 function chooseVideo() {
   $("video-file").value = "";
@@ -104,11 +185,12 @@ function invalidFile(text) {
 }
 function acceptFiles(files) {
   if (files.length !== 1) return invalidFile("Choose one video at a time.");
+  if (document.body.dataset.screen === "result") return newVideo();
   const file = files[0];
   const suffix = file.name.split(".").pop().toLowerCase();
-  if (!VIDEO_SUFFIXES.has(suffix)) return invalidFile("Use an MP4, MOV, WEBM, M4V, MKV or AVI video.");
+  if (!VIDEO_SUFFIXES.has(suffix)) return invalidFile("Use an MP4, MOV or WebM video.");
   if (!file.size) return invalidFile("This file is empty. Choose a video with something in it.");
-  if (file.size > MAX_BYTES) return invalidFile("Choose a video up to 500 MiB and no longer than 10 minutes.");
+  if (file.size > MAX_BYTES) return invalidFile("Choose a video up to 200 MiB and no longer than 5 minutes.");
   startUpload(file);
 }
 
@@ -199,11 +281,11 @@ function startUpload(file) {
   currentStage = -1;
   failed = false;
   pollingFailures = 0;
-  store("splice-job", null);
+
   $("dropzone").classList.remove("is-invalid", "is-dragging");
   $("dropzone").removeAttribute("aria-invalid");
   message("upload-error", "");
-  $("loading-title").textContent = "Analysing your reel…";
+  $("loading-title").textContent = "Preparing video…";
   $("loading-error").hidden = true;
   $("source-name").textContent = file.name;
   $("source-size").textContent = fileSize(file.size);
@@ -214,7 +296,9 @@ function startUpload(file) {
   form.append("file", file);
   const request = new XMLHttpRequest();
   uploadRequest = request;
-  request.open("POST", "/api/analyze-file");
+  request.open("POST", apiPath("/api/analyze-file"));
+  request.setRequestHeader("X-Requested-With", "Splice");
+  request.timeout = 300000;
   request.upload.addEventListener("progress", (event) => {
     if (token !== operation || currentStage !== 0) return;
     if (event.lengthComputable && event.total) {
@@ -232,10 +316,9 @@ function startUpload(file) {
     try { result = JSON.parse(request.responseText); } catch {
       return showFailure("The server returned an unexpected response. Try again.");
     }
+    if (request.status === 401) return window.location.assign(apiPath("/login"));
     if (request.status < 200 || request.status >= 300) return showFailure(responseError(result));
     if (typeof result?.jobId !== "string") return showFailure("The upload was received without a job reference. Try again.");
-    store("splice-job", result.jobId);
-    store("splice-source-" + result.jobId, { name: file.name, size: file.size });
     renderJob(result);
     if (!["complete", "failed"].includes(result.status)) schedulePoll(result.jobId, token);
   });
@@ -253,9 +336,10 @@ async function fetchJob(id) {
   pollController = controller;
   const timer = setTimeout(() => controller.abort(), 15000);
   try {
-    const response = await fetch("/api/jobs/" + encodeURIComponent(id), { signal: controller.signal, cache: "no-store" });
+    const response = await fetch(apiPath("/api/jobs/" + encodeURIComponent(id)), { signal: controller.signal, cache: "no-store" });
     let result;
     try { result = await response.json(); } catch { throw new Error("The server returned an unexpected response."); }
+    if (response.status === 401) window.location.assign(apiPath("/login"));
     if (!response.ok) throw new Error(responseError(result));
     return result;
   } finally {
@@ -287,6 +371,18 @@ function schedulePoll(id, token = operation, delay = 1100) {
 }
 function renderJob(result) {
   job = result;
+  if (["complete", "failed"].includes(result.status)) {
+    jobConnection?.close();
+    jobConnection = null;
+  } else if (!jobConnection) {
+    // Polls update the UI; this uninterrupted connection keeps Fly awake.
+    const connection = new EventSource(apiPath("/api/jobs/" + encodeURIComponent(result.jobId) + "/activity"));
+    jobConnection = connection;
+    connection.onmessage = () => {
+      connection.close();
+      if (jobConnection === connection) jobConnection = null;
+    };
+  }
   if (result.status === "failed") {
     currentStage = Math.max(currentStage, jobStage(result));
     return showFailure(result.error || "This video could not be processed. Retry or choose another video.");
@@ -305,94 +401,85 @@ function renderJob(result) {
   renderResult();
 }
 
+function thumbnailPoster(fallback) {
+  const poster = document.createElement("span");
+  poster.className = "cut-thumbnail";
+  poster.setAttribute("aria-hidden", "true");
+  const placeholder = document.createElement("span");
+  placeholder.className = "thumbnail-placeholder";
+  placeholder.textContent = fallback;
+  const img = document.createElement("img");
+  img.alt = ""; img.hidden = true; img.decoding = "async";
+  poster.append(placeholder, img);
+  return {poster, img};
+}
 function renderResult() {
   clearThumbnails();
   $("cut-count").textContent = String(job.cuts.length);
   const total = job.sourceDuration ?? job.cuts.reduce((sum, cut) => sum + Number(cut.duration), 0);
   $("total-duration").textContent = "Total " + seconds(total);
   const warnings = (job.warnings || []).map((warning) => {
-    if (/no audio/i.test(warning)) return "This reel has no audio track. Type the words you'll record.";
-    if (/whisper|transcri/i.test(warning)) return "Transcription is unavailable for this reel. You can still type your own words.";
+    if (/no audio/i.test(warning)) return "No audio track.";
+    if (/whisper|transcri/i.test(warning)) return "Transcription unavailable. Type your transcript.";
     return warning;
   });
   message("result-warning", warnings.join(" "));
-  const saved = retrieve("splice-selection-" + job.jobId, null);
-  selectedId = job.cuts.some((cut) => cut.id === saved) ? saved : job.cuts[0].id;
+  selectedId = selectedId && job.cuts.some((cut) => cut.id === selectedId) ? selectedId : "original";
   $("cut-strip").replaceChildren();
-  const thumbnails = [];
-  for (const [index, cut] of job.cuts.entries()) {
+  // Original shares Cut 1's poster; playback still uses the full original URL.
+  const cards = [{...job.cuts[0], id: "original"}, ...job.cuts];
+  const thumbnails = new Map();
+  for (const [index, cut] of cards.entries()) {
     const button = document.createElement("button");
-    button.type = "button";
-    button.className = "cut-card";
-    button.dataset.cutId = cut.id;
-    button.setAttribute("aria-pressed", String(cut.id === selectedId));
-    button.setAttribute("aria-label", "Cut " + (index + 1) + ", " + Number(cut.duration).toFixed(2) + " seconds. Play cut.");
-    button.tabIndex = cut.id === selectedId ? 0 : -1;
-    const poster = document.createElement("span");
-    poster.className = "cut-thumbnail";
-    poster.setAttribute("aria-hidden", "true");
-    const placeholder = document.createElement("span");
-    placeholder.className = "thumbnail-placeholder";
-    placeholder.textContent = String(index + 1).padStart(2, "0");
-    const img = document.createElement("img");
-    img.alt = "";
-    img.hidden = true;
-    img.decoding = "async";
-    const duration = document.createElement("span");
-    duration.className = "cut-duration";
-    duration.textContent = seconds(cut.duration);
-    const indicator = document.createElement("span");
-    indicator.className = "selected-play";
-    const icon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-    icon.setAttribute("width", "12");
-    icon.setAttribute("height", "12");
-    icon.setAttribute("viewBox", "0 0 12 12");
-    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    path.setAttribute("d", "M3 1.5v9L10 6z");
-    path.setAttribute("fill", "currentColor");
-    icon.append(path);
-    indicator.append(icon);
-    poster.append(placeholder, img, duration, indicator);
-    const label = document.createElement("span");
-    label.className = "cut-label";
-    label.textContent = "Cut " + (index + 1);
+    button.type = "button"; button.className = "cut-card"; button.dataset.cutId = cut.id;
+    const name = index === 0 ? "Original" : "Cut " + index;
+    button.setAttribute("aria-label", name);
+    const {poster, img} = thumbnailPoster(index === 0 ? "▶" : String(index).padStart(2, "0"));
+    const label = document.createElement("span"); label.className = "cut-label"; label.textContent = name;
     button.append(poster, label);
     button.addEventListener("click", () => selectCut(cut.id, true));
     button.addEventListener("keydown", (event) => {
       let target = index;
       if (event.key === "ArrowLeft") target = Math.max(0, index - 1);
-      else if (event.key === "ArrowRight") target = Math.min(job.cuts.length - 1, index + 1);
+      else if (event.key === "ArrowRight") target = Math.min(cards.length - 1, index + 1);
       else if (event.key === "Home") target = 0;
-      else if (event.key === "End") target = job.cuts.length - 1;
+      else if (event.key === "End") target = cards.length - 1;
       else return;
       event.preventDefault();
-      selectCut(job.cuts[target].id, false);
+      selectCut(cards[target].id, false);
       $("cut-strip").children[target].focus({ preventScroll: true });
     });
     $("cut-strip").append(button);
-    const thumb = cut.thumb || cut.thumbnailUrl;
-    if (thumb) {
-      img.addEventListener("load", () => { img.hidden = false; });
-      img.src = thumb;
-    } else thumbnails.push({ cut, img, button });
+    const shared = thumbnails.get(cut.videoUrl);
+    if (shared) shared.images.push(img);
+    else thumbnails.set(cut.videoUrl, {cut, images: [img], button});
   }
+  const add = document.createElement("button");
+  add.type = "button"; add.className = "cut-card new-video-card"; add.id = "new-video";
+  const plus = document.createElement("span"); plus.textContent = "+"; plus.setAttribute("aria-hidden", "true");
+  const label = document.createElement("strong"); label.textContent = "New Video";
+  add.append(plus, label); add.addEventListener("click", newVideo);
+  $("cut-strip").append(add);
   setScreen("result");
   selectCut(selectedId, false);
-  observeThumbnails(thumbnails);
+  observeThumbnails([...thumbnails.values()], $("cut-strip"));
 }
 function selectCut(id, play) {
   const index = job?.cuts.findIndex((cut) => cut.id === id) ?? -1;
-  if (index < 0) return;
-  const cut = job.cuts[index];
+  if (!job || (index < 0 && id !== "original")) return;
+  flushSave();
+  const original = id === "original";
+  const cut = original ? {videoUrl: job.originalUrl, duration: job.sourceDuration, start: 0, end: job.sourceDuration,
+    transcript: job.cuts.map((item) => item.transcript).filter(Boolean).join(" ")} : job.cuts[index];
   selectedId = id;
-  store("splice-selection-" + job.jobId, id);
+
   for (const card of $("cut-strip").children) {
     const selected = card.dataset.cutId === id;
     card.setAttribute("aria-pressed", String(selected));
-    card.tabIndex = selected ? 0 : -1;
+    card.tabIndex = 0;
     if (selected) card.scrollIntoView({ block: "nearest", inline: "nearest", behavior: reducedMotion.matches ? "auto" : "smooth" });
   }
-  $("selected-title").textContent = "Cut " + (index + 1) + " of " + job.cuts.length;
+  $("selected-title").textContent = original ? "Original video" : "Cut " + (index + 1) + " of " + job.cuts.length;
   $("selected-duration").textContent = Number(cut.duration).toFixed(2) + " seconds";
   $("selected-range").textContent = timestamp(cut.start) + " – " + timestamp(cut.end);
   const player = $("clip-player");
@@ -403,15 +490,18 @@ function selectCut(id, play) {
     player.load();
   }
   player.loop = false;
-  player.setAttribute("aria-label", "Cut " + (index + 1) + " of " + job.cuts.length);
+  player.setAttribute("aria-label", original ? "Original video" : "Cut " + (index + 1) + " of " + job.cuts.length);
   if (play) {
     if (player.ended) player.currentTime = 0;
     player.play().catch(() => { /* Native controls remain available when autoplay is blocked. */ });
   }
   $("download-clip").href = cut.videoUrl;
-  $("download-clip").download = "splice-cut-" + String(index + 1).padStart(2, "0") + ".mp4";
   $("transcript").value = drafts[id] ?? cut.transcript ?? "";
-  $("previous-cut").disabled = index === 0;
+  $("transcript").disabled = original;
+  $("download-clip").textContent = original ? "Download original ↓" : "Download cut ↓";
+  $("download-clip").download = original ? "splice-original" + (job.sourceSuffix || ".mp4") : "splice-cut-" + (index + 1) + ".mp4";
+  $("draft-note").textContent = original ? "Select a cut to edit its transcript." : "Changes save automatically.";
+  $("previous-cut").disabled = index <= 0;
   $("next-cut").disabled = index === job.cuts.length - 1;
   updateDraftMeta();
 }
@@ -419,8 +509,8 @@ function updateDraftMeta() {
   const words = $("transcript").value.trim().split(/\s+/).filter(Boolean).length;
   const edited = Object.hasOwn(drafts, selectedId);
   $("word-count").textContent = words + (words === 1 ? " word" : " words");
-  $("draft-state").textContent = edited ? "Your draft · this tab" : "Original transcript";
-  $("reset-transcript").disabled = !edited;
+  $("draft-state").textContent = edited ? "Your words" : "Original transcript";
+  $("reset-transcript").disabled = selectedId === "original" || !edited;
 }
 function adjacentCut(offset) {
   const index = job.cuts.findIndex((cut) => cut.id === selectedId) + offset;
@@ -428,9 +518,18 @@ function adjacentCut(offset) {
 }
 
 // Decode only nearby thumbnails, one at a time. The visible editor has one player.
-function observeThumbnails(items) {
+function observeThumbnails(items, root = null) {
+  items = items.filter(({cut, images}) => {
+    const thumb = cut.thumb || cut.thumbnailUrl;
+    if (!thumb) return true;
+    for (const img of images) {
+      img.addEventListener("load", () => { img.hidden = false; });
+      img.src = thumb;
+    }
+    return false;
+  });
   if (!("IntersectionObserver" in window)) {
-    thumbnailQueue.push(...items.slice(0, 8));
+    thumbnailQueue.push(...items);
     makeNextThumbnail();
     return;
   }
@@ -444,12 +543,12 @@ function observeThumbnails(items) {
       thumbnailObserver.unobserve(entry.target);
     }
     makeNextThumbnail();
-  }, { root: $("cut-strip"), rootMargin: "0px 160px" });
+  }, { root, rootMargin: "160px" });
   items.forEach((item) => thumbnailObserver.observe(item.button));
 }
 function makeNextThumbnail() {
   if (thumbnailCancel || !thumbnailQueue.length) return;
-  const { cut, img } = thumbnailQueue.shift();
+  const { cut, images } = thumbnailQueue.shift();
   const token = operation;
   const preview = document.createElement("video");
   preview.muted = true;
@@ -468,8 +567,8 @@ function makeNextThumbnail() {
         canvas.width = Math.max(1, Math.round(scale * preview.videoWidth));
         canvas.height = Math.max(1, Math.round(scale * preview.videoHeight));
         canvas.getContext("2d").drawImage(preview, 0, 0, canvas.width, canvas.height);
-        img.src = canvas.toDataURL("image/jpeg", 0.75);
-        img.hidden = false;
+        const frame = canvas.toDataURL("image/jpeg", 0.75);
+        for (const img of images) { img.src = frame; img.hidden = false; }
       } catch { /* A solid numbered poster remains usable without a decoded frame. */ }
     }
     preview.pause();
@@ -523,7 +622,17 @@ document.addEventListener("dragover", (event) => {
 document.addEventListener("drop", (event) => {
   if (Array.from(event.dataTransfer.types).includes("Files")) event.preventDefault();
 });
-$("new-upload").addEventListener("click", resetWorkspace);
+$("home").addEventListener("click", async () => { if (await flushSave()) resetWorkspace(); });
+$("logout").addEventListener("click", async () => {
+  if (!await flushSave()) return;
+  try { await api("/api/logout", {method: "POST"}); window.location.assign(apiPath("/login")); }
+  catch (error) { message("result-warning", error.message); }
+});
+$("new-video-cancel").addEventListener("click", () => $("new-video-dialog").close());
+$("new-video-confirm").addEventListener("click", async () => {
+  if (!await flushSave()) { $("new-video-dialog").close(); return; }
+  $("new-video-dialog").close(); resetWorkspace();
+});
 $("cancel-upload").addEventListener("click", resetWorkspace);
 $("choose-another").addEventListener("click", chooseVideo);
 $("retry-upload").addEventListener("click", () => {
@@ -531,7 +640,7 @@ $("retry-upload").addEventListener("click", () => {
     failed = false;
     pollingFailures = 0;
     $("loading-error").hidden = true;
-    $("loading-title").textContent = "Analysing your reel…";
+    $("loading-title").textContent = "Preparing video…";
     $("loading-live").textContent = "Reconnecting to your reel.";
     renderStages();
     setProgress();
@@ -542,14 +651,18 @@ $("retry-upload").addEventListener("click", () => {
 $("transcript").addEventListener("input", () => {
   if (!job || !selectedId) return;
   drafts[selectedId] = $("transcript").value;
-  const saved = store("splice-drafts-" + job.jobId, drafts);
-  $("draft-note").textContent = saved ? "Edits are saved in this browser tab." : "Edits stay on this page. Copy your words before leaving.";
+  const cut = job.cuts.find((item) => item.id === selectedId);
+  if (cut) cut.transcript = $("transcript").value;
+  queueSave();
   updateDraftMeta();
 });
 $("reset-transcript").addEventListener("click", () => {
-  delete drafts[selectedId];
-  store("splice-drafts-" + job.jobId, drafts);
+  const cut = job.cuts.find((item) => item.id === selectedId);
+  if (!cut) return;
+  cut.transcript = cut.originalTranscript || "";
+  drafts[selectedId] = cut.transcript;
   selectCut(selectedId, false);
+  queueSave();
 });
 $("previous-cut").addEventListener("click", () => adjacentCut(-1));
 $("next-cut").addEventListener("click", () => adjacentCut(1));
@@ -560,25 +673,16 @@ $("replay-cut").addEventListener("click", () => {
 });
 $("clip-player").addEventListener("error", () => {
   if (document.body.dataset.screen === "result" && $("clip-player").getAttribute("src")) {
-    message("player-error", "This cut could not be played in this browser. Download the cut to watch it, or choose another video.");
+    const name = selectedId === "original" ? "original video" : "cut";
+    message("player-error", "This " + name + " could not be played in this browser. Download it to watch it, or choose another video.");
   }
 });
 
-(async function restoreJob() {
-  const id = retrieve("splice-job", null);
-  if (typeof id !== "string") return;
-  const token = operation;
+(async function initialise() {
   try {
-    const result = await fetchJob(id);
-    if (token !== operation) return;
-    const savedDrafts = retrieve("splice-drafts-" + id, {});
-    drafts = savedDrafts && typeof savedDrafts === "object" && !Array.isArray(savedDrafts) ? savedDrafts : {};
-    const source = retrieve("splice-source-" + id, null);
-    $("source-name").textContent = source?.name || "Previous upload";
-    $("source-size").textContent = typeof source?.size === "number" ? fileSize(source.size) : "";
-    renderJob(result);
-    if (!["complete", "failed"].includes(result.status)) schedulePoll(id, token);
-  } catch {
-    if (token === operation) store("splice-job", null);
-  }
+    const session = await api("/api/session");
+    $("account-email").textContent = session.email;
+    $("admin-link").hidden = !session.admin;
+    await loadRecent();
+  } catch (error) { message("recent-error", error.message); }
 })();

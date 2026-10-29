@@ -1,0 +1,47 @@
+# Deploy with --ha=false; SQLite and the processing queue require one Machine.
+app = "splice-tools"
+primary_region = "lhr"
+kill_signal = "SIGTERM"
+kill_timeout = 300
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  SPLICE_ENV = "production"
+  SPLICE_DATA_DIR = "/data"
+  SPLICE_ORIGIN = "https://madebyluke.co"
+  SPLICE_BASE_PATH = "/tools"
+  SPLICE_HSTS = "0"
+
+[[mounts]]
+  source = "splice_data"
+  destination = "/data"
+  # These defaults apply only to new volumes; never resize existing data here.
+  initial_size = "3gb"
+  snapshot_retention = 1
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "stop"
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [http_service.concurrency]
+    # The browser holds /api/jobs/{id}/activity open during preparation.
+    type = "connections"
+    soft_limit = 30
+    hard_limit = 50
+
+  [[http_service.checks]]
+    grace_period = "60s"
+    interval = "30s"
+    method = "GET"
+    path = "/tools/api/health"
+    timeout = "5s"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "1gb"

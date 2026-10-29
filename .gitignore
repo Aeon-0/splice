@@ -11,3 +11,10 @@ cookies.txt
 .DS_Store
 node_modules/
 .jobs/
+
+.env.*
+*.pem
+*.key
+credentials*
+logs/
+.vendor/

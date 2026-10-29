@@ -19,7 +19,7 @@ if ! kill -0 "$PID" 2>/dev/null; then
 fi
 COMMAND=$(ps -p "$PID" -o command= 2>/dev/null || true)
 case "$COMMAND" in
-    *uvicorn*"--app-dir $ROOT --host 0.0.0.0 --port 8787"*) ;;
+    *uvicorn*"--app-dir $ROOT --host 127.0.0.1 --port 8787"*) ;;
     *) echo "The PID file refers to another process. Leaving it alone." >&2; exit 1 ;;
 esac
 kill -TERM "$PID"
